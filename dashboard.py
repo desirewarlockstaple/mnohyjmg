@@ -6,13 +6,14 @@ Streamlit dashboard для жюри и автора проекта.
 Показывает: общая статистика, география пользователей, прирост
 компетенции (pre/post), distribution NPS, топ-сценарии.
 """
+
 from __future__ import annotations
 
 import os
 import sqlite3
 from pathlib import Path
 
-import pandas as pd  # noqa: I001
+import pandas as pd
 import streamlit as st
 
 DB_PATH = os.getenv("DB_PATH", str(Path(__file__).resolve().parent / "spas.db"))
