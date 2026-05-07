@@ -8,9 +8,11 @@
 с голосовой дорожкой 110 BPM длительностью 60 секунд (см. README.md
 о том, как сгенерировать с помощью FFmpeg).
 """
+
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from pathlib import Path
 
@@ -44,10 +46,8 @@ async def send_text_metronome(bot: Bot, chat_id: int, bpm: int = 110, seconds: i
         for i in range(total_beats):
             await asyncio.sleep(interval)
             if i % 4 == 0:
-                try:
+                with contextlib.suppress(Exception):
                     await msg.edit_text(f"🥁 Темп {bpm}/мин\nУдар {i + 1} из {total_beats}")
-                except Exception:  # noqa: BLE001
-                    pass
         await msg.edit_text("✅ Метроном завершён. Продолжай в этом темпе сам(а).")
     except asyncio.CancelledError:
         pass

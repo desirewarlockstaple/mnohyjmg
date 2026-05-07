@@ -8,6 +8,7 @@
 Если ключи не заданы — бот сам отвечает «свободные вопросы пока не доступны,
 выберите сценарий из меню».
 """
+
 from __future__ import annotations
 
 import logging
@@ -42,13 +43,13 @@ async def ask_llm(question: str) -> str | None:
     if os.getenv("GIGACHAT_API_KEY"):
         try:
             return await _ask_gigachat(question)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.warning("GigaChat failed: %s", exc)
 
     if os.getenv("YANDEX_API_KEY") and os.getenv("YANDEX_FOLDER_ID"):
         try:
             return await _ask_yandex(question)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.warning("YandexGPT failed: %s", exc)
 
     return None
@@ -67,11 +68,13 @@ async def _ask_gigachat(question: str) -> str:
         "temperature": 0.2,
         "max_tokens": 400,
     }
-    async with aiohttp.ClientSession() as s:
-        async with s.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=20)) as r:
-            r.raise_for_status()
-            data = await r.json()
-            return data["choices"][0]["message"]["content"]
+    async with (
+        aiohttp.ClientSession() as s,
+        s.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=20)) as r,
+    ):
+        r.raise_for_status()
+        data = await r.json()
+        return data["choices"][0]["message"]["content"]
 
 
 async def _ask_yandex(question: str) -> str:
@@ -87,8 +90,10 @@ async def _ask_yandex(question: str) -> str:
             {"role": "user", "text": question},
         ],
     }
-    async with aiohttp.ClientSession() as s:
-        async with s.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=20)) as r:
-            r.raise_for_status()
-            data = await r.json()
-            return data["result"]["alternatives"][0]["message"]["text"]
+    async with (
+        aiohttp.ClientSession() as s,
+        s.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=20)) as r,
+    ):
+        r.raise_for_status()
+        data = await r.json()
+        return data["result"]["alternatives"][0]["message"]["text"]

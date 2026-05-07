@@ -7,6 +7,7 @@
 Overpass API (OpenStreetMap, тег emergency=defibrillator) и краудсорс
 от пользователей бота.
 """
+
 from __future__ import annotations
 
 import math
@@ -31,9 +32,6 @@ class AedHit:
 
 
 def nearest(lat: float, lon: float, locations: list[AedLocation], k: int = 3) -> list[AedHit]:
-    hits = [
-        AedHit(location=loc, distance_km=haversine_km(lat, lon, loc.lat, loc.lon))
-        for loc in locations
-    ]
+    hits = [AedHit(location=loc, distance_km=haversine_km(lat, lon, loc.lat, loc.lon)) for loc in locations]
     hits.sort(key=lambda h: h.distance_km)
     return hits[:k]

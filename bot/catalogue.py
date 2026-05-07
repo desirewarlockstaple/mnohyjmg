@@ -1,4 +1,5 @@
 """Загрузчик базы сценариев первой помощи."""
+
 from __future__ import annotations
 
 import json
@@ -27,6 +28,7 @@ class Scenario:
     metronome: bool
     phone: str
     post_test: list[TestQuestion]
+    pre_test: list[TestQuestion]
 
 
 @dataclass
@@ -58,6 +60,7 @@ class Catalogue:
                 metronome=bool(raw.get("metronome")),
                 phone=raw.get("phone", "112"),
                 post_test=[TestQuestion(**q) for q in raw.get("post_test", [])],
+                pre_test=[TestQuestion(**q) for q in raw.get("pre_test", [])],
             )
             self.scenarios[scenario.id] = scenario
 

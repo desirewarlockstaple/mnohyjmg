@@ -2,6 +2,7 @@
 СПАС: AI-помощник первой помощи — Telegram bot.
 Точка входа.
 """
+
 from __future__ import annotations
 
 import asyncio
