@@ -1,4 +1,5 @@
 """Тесты хранилища (SQLite)."""
+
 from __future__ import annotations
 
 import pytest
@@ -59,8 +60,13 @@ async def test_aed_submissions_lifecycle(storage: Storage) -> None:
 
 async def test_invalid_aed_status_rejected(storage: Storage) -> None:
     sub_id = await storage.insert_aed_submission(
-        user_id=11, city=None, name=None, note=None,
-        lat=55.7, lon=37.6, photo_file_id=None,
+        user_id=11,
+        city=None,
+        name=None,
+        note=None,
+        lat=55.7,
+        lon=37.6,
+        photo_file_id=None,
     )
     with pytest.raises(ValueError):
         await storage.update_aed_status(sub_id, "ohnoes")

@@ -1,4 +1,5 @@
 """Тесты чек-листа диспетчера."""
+
 from __future__ import annotations
 
 from pathlib import Path

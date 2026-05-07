@@ -1,4 +1,5 @@
 """Тесты функций поиска ближайших АНД."""
+
 from __future__ import annotations
 
 from bot.aed import nearest
@@ -24,8 +25,7 @@ def test_nearest_returns_sorted_results() -> None:
 
 def test_nearest_k_limits_results() -> None:
     locations = [
-        AedLocation(city="A", name=str(i), lat=55.0 + i * 0.01, lon=37.0, note="")
-        for i in range(10)
+        AedLocation(city="A", name=str(i), lat=55.0 + i * 0.01, lon=37.0, note="") for i in range(10)
     ]
     hits = nearest(55.0, 37.0, locations, k=3)
     assert len(hits) == 3

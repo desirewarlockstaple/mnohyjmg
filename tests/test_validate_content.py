@@ -1,4 +1,5 @@
 """Контентный валидатор должен находить наш content/ как корректный."""
+
 from __future__ import annotations
 
 import subprocess
