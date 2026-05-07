@@ -118,6 +118,9 @@
     margin: 24px 0 0;
     font-size: 14px;
   }
+  .lang { position: absolute; top: 16px; right: 24px; }
+  .lang a { color: var(--muted); text-decoration: none; font-size: 14px; margin-left: 12px; }
+  .lang a.active { color: var(--fg); font-weight: 600; }
   @media (max-width: 600px) {
     h1 { font-size: 40px; }
     .subtitle { font-size: 18px; }
@@ -126,6 +129,10 @@
 </head>
 <body>
 <header>
+  <div class="lang">
+    <a href="index.html" class="active">RU</a>
+    <a href="index.en.html">EN</a>
+  </div>
   <div class="tag">XXIII «Моя страна — Моя Россия» · Моё здоровье</div>
   <h1>СПАС</h1>
   <div class="subtitle">AI-помощник первой помощи в Telegram. 30 сценариев, голосовой метроном СЛР, карта АНД, звонок 112 одним нажатием. Бесплатно. Без установки приложения.</div>

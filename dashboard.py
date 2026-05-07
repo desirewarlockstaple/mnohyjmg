@@ -56,7 +56,8 @@ def main() -> None:
 
     st.subheader("События по дням")
     if not events.empty:
-        events["ts"] = pd.to_datetime(events["ts"])
+        events["ts"] = pd.to_datetime(events["ts"], format="ISO8601", errors="coerce")
+        events = events.dropna(subset=["ts"])
         daily = events.groupby([events["ts"].dt.date, "name"]).size().unstack(fill_value=0)
         st.line_chart(daily)
 
