@@ -149,12 +149,48 @@ sudo journalctl -u spas -f
 - `/sos` — экстренный экран с алгоритмом
 - `/aed` — поиск ближайшего АНД по геолокации
 - `/ask` — свободный вопрос AI (требует ключ GigaChat / YandexGPT)
+- `/panic` — кнопка «мне страшно»: 4-7-8 дыхание + 5-4-3-2-1 grounding
+- `/dispatcher` — что говорить оператору 112 (5 вопросов)
 - `/feedback` — NPS‑опрос
 - `/stats` — метрики (только для админа по `ADMIN_ID`)
-- Сценарии: pre‑test → пошаговый алгоритм → post‑test → автоматический learning gain
+- `/profile` — XP, уровень, ачивки (геймификация)
+- `/teacher`, `/join CODE`, `/teacher_dashboard` — учительский режим
+- `/sos_contact`, `/sos_share`, `/sos_clear` — доверенный контакт + геолокация
+- `/share_progress`, `/share_certificate` — поделиться с близкими
+- `/accessibility` — plain-text режим без эмодзи и HTML
+- Голосовой ввод (Yandex SpeechKit) — опционально, через `YANDEX_STT_API_KEY`
+- Сценарии: pre‑test → пошаговый алгоритм → post‑test → automatic learning gain
 - Голосовой метроном для модулей СЛР (110 BPM)
 - Кнопка «Позвонить 112» (`tel:` deep link, открывает звонилку)
 - Аналитика: события, NPS, pre/post в SQLite
+
+## Дополнительные сервисы
+
+- **REST API** (`/api/scenarios`, `/api/aed`, `/api/dispatcher`, `/api/panic`)
+  на порту `API_PORT=8090` — для встраивания в школьные сайты.
+- **Виджет** `landing/widget.js` — две строки в HTML и блок с топ-9
+  сценариев + кнопка запуска бота.
+- **PWA-лендинг** — добавляется на главный экран Android/iOS, работает
+  офлайн (cached scenarios + service worker).
+- **Liveness** на порту `HEALTH_PORT=8080` (`/health`) — для Fly.io /
+  Railway healthcheck.
+- **Дашборд (D)** — когортный retention, NPS-хитмэп, поведенческая воронка,
+  A/B-эксперименты, лидерборд XP. Запуск: `streamlit run dashboard.py`.
+
+## Запуск всех компонентов одной командой
+
+```bash
+docker compose up --build
+```
+
+Запустит бота с включённым `/health`, REST API и SQLite в `./data/spas.db`.
+
+## Документы для конкурса
+
+- `docs/jury_deck.md` — Marp-дек на 10 слайдов (`npx @marp-team/marp-cli` → PDF/PPTX).
+- `docs/finance_model.md` — финансовая модель на 3 года.
+- `docs/roadmap.md` — Mermaid Gantt 2026–2028.
+- `docs/governance_152fz.md` — соответствие 152-ФЗ.
 
 ## Метрики (для заявки и защиты)
 

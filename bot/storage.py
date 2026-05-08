@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
+import secrets
 from typing import Any
 
 import aiosqlite
+
+from bot.migrations import run_migrations
 
 log = logging.getLogger("spas.storage")
 
@@ -88,7 +92,8 @@ class Storage:
         self._db = await aiosqlite.connect(self.path)
         await self._db.executescript(SCHEMA)
         await self._db.commit()
-        log.info("Storage ready: %s", self.path)
+        version = await run_migrations(self._db)
+        log.info("Storage ready: %s (schema v%d)", self.path, version)
 
     async def close(self) -> None:
         if self._db:
@@ -200,6 +205,257 @@ class Storage:
         )
         await self.db.commit()
         return (cur.rowcount or 0) > 0
+
+    # --- user settings (language, accessibility) -----------------------
+
+    async def get_user_settings(self, user_id: int) -> dict[str, Any]:
+        cur = await self.db.execute(
+            "SELECT language, accessibility FROM user_settings WHERE user_id=?",
+            (user_id,),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return {"language": "ru", "accessibility": False}
+        return {"language": row[0], "accessibility": bool(row[1])}
+
+    async def set_user_setting(
+        self, user_id: int, *, language: str | None = None, accessibility: bool | None = None
+    ) -> None:
+        cur = await self.db.execute(
+            "SELECT language, accessibility FROM user_settings WHERE user_id=?",
+            (user_id,),
+        )
+        row = await cur.fetchone()
+        new_lang = language if language is not None else (row[0] if row else "ru")
+        new_a11y = int(accessibility) if accessibility is not None else (int(row[1]) if row else 0)
+        now = _now()
+        if row:
+            await self.db.execute(
+                "UPDATE user_settings SET language=?, accessibility=?, updated_at=? WHERE user_id=?",
+                (new_lang, new_a11y, now, user_id),
+            )
+        else:
+            await self.db.execute(
+                "INSERT INTO user_settings(user_id, language, accessibility, updated_at) VALUES(?,?,?,?)",
+                (user_id, new_lang, new_a11y, now),
+            )
+        await self.db.commit()
+
+    # --- gamification (XP, level, achievements) ------------------------
+
+    async def get_xp(self, user_id: int) -> dict[str, Any]:
+        cur = await self.db.execute(
+            "SELECT xp, level, achievements, streak_days, last_active FROM user_xp WHERE user_id=?",
+            (user_id,),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return {"xp": 0, "level": 1, "achievements": [], "streak_days": 0, "last_active": None}
+        achievements: list[str] = []
+        try:
+            parsed = json.loads(row[2] or "[]")
+            if isinstance(parsed, list):
+                achievements = [str(item) for item in parsed]
+        except json.JSONDecodeError:
+            achievements = []
+        return {
+            "xp": int(row[0]),
+            "level": int(row[1]),
+            "achievements": achievements,
+            "streak_days": int(row[3]),
+            "last_active": row[4],
+        }
+
+    async def save_xp(
+        self,
+        user_id: int,
+        *,
+        xp: int,
+        level: int,
+        achievements: list[str],
+        streak_days: int,
+        last_active: str,
+    ) -> None:
+        await self.db.execute(
+            """
+            INSERT INTO user_xp(user_id, xp, level, achievements, streak_days, last_active)
+            VALUES(?,?,?,?,?,?)
+            ON CONFLICT(user_id) DO UPDATE SET
+              xp = excluded.xp,
+              level = excluded.level,
+              achievements = excluded.achievements,
+              streak_days = excluded.streak_days,
+              last_active = excluded.last_active
+            """,
+            (user_id, xp, level, json.dumps(achievements, ensure_ascii=False), streak_days, last_active),
+        )
+        await self.db.commit()
+
+    async def leaderboard(self, limit: int = 10) -> list[dict[str, Any]]:
+        cur = await self.db.execute(
+            """
+            SELECT u.user_id, COALESCE(u.username, ''), x.xp, x.level
+            FROM user_xp x
+            LEFT JOIN users u USING(user_id)
+            ORDER BY x.xp DESC LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = await cur.fetchall()
+        return [{"user_id": r[0], "username": r[1], "xp": int(r[2]), "level": int(r[3])} for r in rows]
+
+    # --- teacher / class -----------------------------------------------
+
+    async def create_class(self, teacher_id: int, name: str) -> dict[str, Any]:
+        code = secrets.token_urlsafe(6)[:8].upper().replace("-", "X").replace("_", "Y")
+        cur = await self.db.execute(
+            """
+            INSERT INTO classes(teacher_id, name, invite_code, created_at)
+            VALUES(?, ?, ?, ?)
+            """,
+            (teacher_id, name[:80], code, _now()),
+        )
+        await self.db.commit()
+        return {"id": int(cur.lastrowid or 0), "name": name[:80], "invite_code": code}
+
+    async def list_classes_by_teacher(self, teacher_id: int) -> list[dict[str, Any]]:
+        cur = await self.db.execute(
+            "SELECT id, name, invite_code, created_at FROM classes WHERE teacher_id=? ORDER BY id DESC",
+            (teacher_id,),
+        )
+        rows = await cur.fetchall()
+        return [{"id": r[0], "name": r[1], "invite_code": r[2], "created_at": r[3]} for r in rows]
+
+    async def class_by_code(self, code: str) -> dict[str, Any] | None:
+        cur = await self.db.execute(
+            "SELECT id, teacher_id, name, invite_code, created_at FROM classes WHERE invite_code=?",
+            (code,),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return None
+        return {
+            "id": row[0],
+            "teacher_id": row[1],
+            "name": row[2],
+            "invite_code": row[3],
+            "created_at": row[4],
+        }
+
+    async def join_class(self, class_id: int, user_id: int, nickname: str | None = None) -> bool:
+        try:
+            await self.db.execute(
+                """
+                INSERT INTO class_members(class_id, user_id, joined_at, nickname)
+                VALUES(?, ?, ?, ?)
+                """,
+                (class_id, user_id, _now(), nickname[:40] if nickname else None),
+            )
+            await self.db.commit()
+            return True
+        except aiosqlite.IntegrityError:
+            return False
+
+    async def class_members(self, class_id: int) -> list[dict[str, Any]]:
+        cur = await self.db.execute(
+            """
+            SELECT user_id, joined_at, nickname FROM class_members WHERE class_id=?
+            ORDER BY joined_at ASC
+            """,
+            (class_id,),
+        )
+        rows = await cur.fetchall()
+        return [{"user_id": r[0], "joined_at": r[1], "nickname": r[2]} for r in rows]
+
+    async def class_progress(self, class_id: int) -> list[dict[str, Any]]:
+        cur = await self.db.execute(
+            """
+            SELECT cm.user_id, cm.nickname,
+                   COALESCE(x.xp, 0), COALESCE(x.level, 1),
+                   (SELECT COUNT(DISTINCT payload) FROM events e
+                    WHERE e.user_id = cm.user_id AND e.name='scenario_complete'
+                      AND e.payload IS NOT NULL) AS completed
+            FROM class_members cm
+            LEFT JOIN user_xp x ON x.user_id = cm.user_id
+            WHERE cm.class_id = ?
+            ORDER BY completed DESC, x.xp DESC
+            """,
+            (class_id,),
+        )
+        rows = await cur.fetchall()
+        return [
+            {
+                "user_id": r[0],
+                "nickname": r[1] or f"user_{r[0]}",
+                "xp": int(r[2]),
+                "level": int(r[3]),
+                "completed": int(r[4]),
+            }
+            for r in rows
+        ]
+
+    # --- SOS contacts --------------------------------------------------
+
+    async def set_sos_contact(
+        self,
+        user_id: int,
+        *,
+        contact_chat_id: int | None,
+        contact_username: str | None,
+        display_name: str | None,
+    ) -> None:
+        await self.db.execute(
+            """
+            INSERT INTO sos_contacts(user_id, contact_chat_id, contact_username, display_name, created_at)
+            VALUES(?,?,?,?,?)
+            ON CONFLICT(user_id) DO UPDATE SET
+              contact_chat_id = excluded.contact_chat_id,
+              contact_username = excluded.contact_username,
+              display_name = excluded.display_name,
+              created_at = excluded.created_at
+            """,
+            (user_id, contact_chat_id, contact_username, display_name, _now()),
+        )
+        await self.db.commit()
+
+    async def get_sos_contact(self, user_id: int) -> dict[str, Any] | None:
+        cur = await self.db.execute(
+            "SELECT contact_chat_id, contact_username, display_name FROM sos_contacts WHERE user_id=?",
+            (user_id,),
+        )
+        row = await cur.fetchone()
+        if not row:
+            return None
+        return {
+            "contact_chat_id": row[0],
+            "contact_username": row[1],
+            "display_name": row[2],
+        }
+
+    async def delete_sos_contact(self, user_id: int) -> bool:
+        cur = await self.db.execute("DELETE FROM sos_contacts WHERE user_id=?", (user_id,))
+        await self.db.commit()
+        return (cur.rowcount or 0) > 0
+
+    # --- A/B assignment ------------------------------------------------
+
+    async def assign_ab_variant(self, user_id: int, experiment: str, variant: str) -> str:
+        cur = await self.db.execute(
+            "SELECT variant FROM ab_assignments WHERE user_id=? AND experiment=?",
+            (user_id, experiment),
+        )
+        row = await cur.fetchone()
+        if row:
+            return str(row[0])
+        await self.db.execute(
+            """
+            INSERT INTO ab_assignments(user_id, experiment, variant, assigned_at)
+            VALUES(?,?,?,?)
+            """,
+            (user_id, experiment, variant, _now()),
+        )
+        await self.db.commit()
+        return variant
 
     async def metrics(self) -> dict[str, Any]:
         cur = await self.db.execute("SELECT COUNT(*) FROM users")

@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 
 from aiogram import Dispatcher, F
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -23,6 +23,7 @@ from aiogram.types import (
     ReplyKeyboardRemove,
 )
 
+from bot.accessibility import render as a11y_render
 from bot.aed import nearest
 from bot.catalogue import Catalogue, Scenario
 from bot.certificate import (
@@ -35,6 +36,8 @@ from bot.dispatcher import (
     load_dispatcher_checklist,
     render_summary,
 )
+from bot.gamification import evaluate_event, render_profile
+from bot.i18n import normalize_lang, t
 from bot.llm import ask_llm
 from bot.metronome import send_audio_metronome, send_text_metronome
 from bot.panic import (
@@ -45,7 +48,15 @@ from bot.panic import (
     run_breathing,
     triage_kb,
 )
+from bot.sharing import (
+    share_certificate_text,
+    share_progress_text,
+    telegram_share_url,
+)
+from bot.sos import render_sos_message
 from bot.storage import Storage
+from bot.stt import stt_enabled, transcribe_ogg
+from bot.teacher import JoinClassState, TeacherState, render_class_progress, teacher_classes_kb
 
 log = logging.getLogger("spas.handlers")
 
@@ -72,6 +83,11 @@ class AedSubmitState(StatesGroup):
 
 class CertificateState(StatesGroup):
     waiting_name = State()
+
+
+class SOSContactState(StatesGroup):
+    waiting_contact = State()
+    waiting_share_location = State()
 
 
 WELCOME = (
@@ -104,6 +120,7 @@ def main_menu_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="➕ Добавить АНД на карту", callback_data="menu:add_aed")],
         [InlineKeyboardButton(text="📞 Что сказать диспетчеру 112", callback_data="menu:dispatcher")],
         [InlineKeyboardButton(text="🎓 Мой сертификат", callback_data="menu:certificate")],
+        [InlineKeyboardButton(text="🏅 Профиль и XP", callback_data="menu:profile")],
         [InlineKeyboardButton(text="❓ Свободный вопрос (AI)", callback_data="menu:ask")],
         [InlineKeyboardButton(text="📊 Поделиться обратной связью", callback_data="menu:nps")],
     ]
@@ -188,6 +205,60 @@ def register_handlers(dp: Dispatcher, *, storage: Storage, content_dir: Path) ->
     panic_protocol = load_panic_protocol(content_dir)
     dispatcher_checklist = load_dispatcher_checklist(content_dir)
 
+    async def _say(message: Message, html: str, **kwargs: object) -> Message:
+        """Send a reply, applying user's accessibility preference."""
+        a11y = False
+        if message.from_user:
+            settings = await storage.get_user_settings(message.from_user.id)
+            a11y = bool(settings.get("accessibility"))
+        return await message.answer(a11y_render(html, accessibility=a11y), **kwargs)  # type: ignore[arg-type]
+
+    async def _grant_xp(
+        user_id: int,
+        event: str,
+        *,
+        perfect_post: bool = False,
+    ) -> tuple[int, list[str]] | None:
+        """Apply XP for an event; returns (xp_gained, new_achievement_titles) if changed."""
+        try:
+            state = await storage.get_xp(user_id)
+            completed_count = await storage.count_distinct_completed_scenarios(user_id)
+            completed_set = {f"_{i}" for i in range(completed_count)}
+            delta = evaluate_event(
+                state=state,
+                event=event,
+                completed_scenarios=completed_set,
+                perfect_post=perfect_post,
+            )
+            new_xp = int(state.get("xp", 0)) + delta.xp_gained
+            await storage.save_xp(
+                user_id,
+                xp=new_xp,
+                level=delta.new_level,
+                achievements=list(state.get("achievements", [])) + [a.code for a in delta.new_achievements],
+                streak_days=delta.streak_days,
+                last_active=_dt.datetime.now(_dt.UTC).isoformat(),
+            )
+            titles = [a.title for a in delta.new_achievements]
+            return delta.xp_gained, titles
+        except Exception as exc:
+            log.warning("grant_xp(%s, %s) failed: %s", user_id, event, exc)
+            return None
+
+    async def _maybe_celebrate(message: Message, grant: tuple[int, list[str]] | None) -> None:
+        if grant is None:
+            return
+        gained, titles = grant
+        if gained <= 0 and not titles:
+            return
+        parts: list[str] = []
+        if gained > 0:
+            parts.append(f"+{gained} XP")
+        if titles:
+            ach_lines = "\n".join(f"🏅 <b>{t_}</b>" for t_ in titles)
+            parts.append(f"Новые ачивки:\n{ach_lines}")
+        await _say(message, "\n\n".join(parts))
+
     async def _start(message: Message, state: FSMContext) -> None:
         await state.clear()
         u = message.from_user
@@ -216,6 +287,17 @@ def register_handlers(dp: Dispatcher, *, storage: Storage, content_dir: Path) ->
             "/add_aed — добавить АНД на карту\n"
             "/dispatcher — что сказать диспетчеру 112\n"
             "/certificate — мой сертификат участника\n"
+            "/profile — мой XP и ачивки\n"
+            "/leaderboard — топ-10\n"
+            "/setup_sos — задать доверенный контакт\n"
+            "/sos_share — отправить SOS контакту с геолокацией\n"
+            "/share_progress — поделиться прогрессом\n"
+            "/share_certificate — поделиться сертификатом\n"
+            "/teacher — открыть учительский режим\n"
+            "/teacher_dashboard — мои классы\n"
+            "/join CODE — присоединиться к классу\n"
+            "/accessibility — крупный текст без эмодзи\n"
+            "/lang — поменять язык (ru/en)\n"
             "/ask — свободный вопрос AI\n"
             "/feedback — оценить бот\n\n"
             "Если в опасной ситуации — звони 112."
@@ -256,6 +338,8 @@ def register_handlers(dp: Dispatcher, *, storage: Storage, content_dir: Path) ->
             )
             if cb.bot is not None:
                 await run_breathing(cb.bot, target.chat.id, panic_protocol)
+            grant = await _grant_xp(cb.from_user.id, "panic_breathe")
+            await _maybe_celebrate(target, grant)
         elif action == "ground":
             await storage.log_event(cb.from_user.id, "panic_ground")
             lines = [panic_protocol.grounding_title]
@@ -508,12 +592,18 @@ def register_handlers(dp: Dispatcher, *, storage: Storage, content_dir: Path) ->
     ) -> None:
         if next_idx >= len(dispatcher_checklist.questions):
             text = render_summary(dispatcher_checklist, answers)
+            target_msg: Message | None = None
             if isinstance(sender, CallbackQuery) and isinstance(sender.message, Message):
                 await sender.message.answer(text, reply_markup=main_menu_kb())
+                target_msg = sender.message
             elif isinstance(sender, Message):
                 await sender.answer(text, reply_markup=main_menu_kb())
+                target_msg = sender
             if sender.from_user:
                 await storage.log_event(sender.from_user.id, "dispatcher_done")
+                if target_msg is not None:
+                    grant = await _grant_xp(sender.from_user.id, "dispatcher_done")
+                    await _maybe_celebrate(target_msg, grant)
             await state.clear()
             return
         await state.update_data(answers=answers, q_idx=next_idx)
@@ -637,6 +727,9 @@ def register_handlers(dp: Dispatcher, *, storage: Storage, content_dir: Path) ->
                 "Напиши свой вопрос одним сообщением, я отвечу коротко.",
                 reply_markup=ReplyKeyboardRemove(),
             )
+        elif action == "profile":
+            xp_state = await storage.get_xp(cb.from_user.id)
+            await target.answer(render_profile(xp_state))
         elif action == "nps":
             await target.answer("Оцени от 0 до 10:", reply_markup=nps_kb())
         await cb.answer()
@@ -879,6 +972,393 @@ def register_handlers(dp: Dispatcher, *, storage: Storage, content_dir: Path) ->
         await cb.answer(f"#{sub_id} → {new_status}")
 
     dp.callback_query.register(_aed_mod_cb, F.data.startswith("aed_mod:"))
+
+    # ---- gamification: /profile, /leaderboard ----------------------------
+
+    async def _profile_cmd(message: Message) -> None:
+        if not message.from_user:
+            return
+        state_ = await storage.get_xp(message.from_user.id)
+        await _say(message, render_profile(state_))
+
+    dp.message.register(_profile_cmd, Command("profile"))
+
+    async def _leaderboard_cmd(message: Message) -> None:
+        rows = await storage.leaderboard(limit=10)
+        if not rows:
+            await _say(message, "Лидерборд пуст. Стань первым: /start")
+            return
+        lines = ["<b>🏆 Лидеры по XP</b>", ""]
+        for i, r in enumerate(rows, start=1):
+            handle = ("@" + r["username"]) if r["username"] else f"user_{r['user_id']}"
+            lines.append(f"{i}. <b>{handle}</b> — Lv {r['level']} · {r['xp']} XP")
+        await _say(message, "\n".join(lines))
+
+    dp.message.register(_leaderboard_cmd, Command("leaderboard"))
+
+    # ---- accessibility & language ----------------------------------------
+
+    async def _accessibility_cmd(message: Message) -> None:
+        if not message.from_user:
+            return
+        s = await storage.get_user_settings(message.from_user.id)
+        new_value = not bool(s.get("accessibility"))
+        await storage.set_user_setting(message.from_user.id, accessibility=new_value)
+        lang = normalize_lang(s.get("language", "ru"))
+        key = "a11y.on" if new_value else "a11y.off"
+        await message.answer(t(key, lang))
+
+    dp.message.register(_accessibility_cmd, Command("accessibility"))
+
+    async def _lang_cmd(message: Message, command: CommandObject) -> None:
+        if not message.from_user:
+            return
+        arg = (command.args or "").strip().lower()
+        if arg in ("ru", "en"):
+            await storage.set_user_setting(message.from_user.id, language=arg)
+            await message.answer(t("lang.changed", arg))
+            return
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="🇷🇺 Русский", callback_data="lang:ru"),
+                    InlineKeyboardButton(text="🇬🇧 English", callback_data="lang:en"),
+                ]
+            ]
+        )
+        await message.answer("Choose language / Выбери язык:", reply_markup=kb)
+
+    dp.message.register(_lang_cmd, Command("lang"))
+
+    async def _lang_cb(cb: CallbackQuery) -> None:
+        if not cb.data or not cb.from_user:
+            await cb.answer()
+            return
+        code = cb.data.split(":", 1)[1]
+        if code not in ("ru", "en"):
+            await cb.answer()
+            return
+        await storage.set_user_setting(cb.from_user.id, language=code)
+        if isinstance(cb.message, Message):
+            await cb.message.edit_text(t("lang.changed", code))
+        await cb.answer()
+
+    dp.callback_query.register(_lang_cb, F.data.startswith("lang:"))
+
+    # ---- SOS: trusted contact + /sos_share with location -----------------
+
+    async def _setup_sos_cmd(message: Message, state: FSMContext) -> None:
+        if not message.from_user:
+            return
+        await state.set_state(SOSContactState.waiting_contact)
+        await _say(
+            message,
+            "🆘 <b>Настройка доверенного контакта.</b>\n\n"
+            "Перешли мне любое сообщение от того, кому я должен послать "
+            "тревогу при /sos_share. Я запомню его chat_id (без сообщений, "
+            "только сам контакт).",
+        )
+
+    dp.message.register(_setup_sos_cmd, Command("setup_sos"))
+
+    async def _setup_sos_msg(message: Message, state: FSMContext) -> None:
+        if not message.from_user:
+            return
+        forwarded_from = getattr(message, "forward_from", None)
+        if not forwarded_from:
+            await _say(
+                message,
+                "Это не похоже на пересланное сообщение. Перешли любое "
+                "сообщение от доверенного контакта (если у него скрыто "
+                "пересланное от — он скрыл это в настройках, попроси "
+                "его временно включить).",
+            )
+            return
+        display_name = f"{forwarded_from.first_name or ''} {forwarded_from.last_name or ''}".strip() or (
+            f"@{forwarded_from.username}" if forwarded_from.username else "контакт"
+        )
+        await storage.set_sos_contact(
+            message.from_user.id,
+            contact_chat_id=forwarded_from.id,
+            contact_username=forwarded_from.username,
+            display_name=display_name[:80],
+        )
+        await state.clear()
+        s = await storage.get_user_settings(message.from_user.id)
+        await message.answer(t("sos.set_ok", s.get("language", "ru"), name=display_name))
+
+    dp.message.register(_setup_sos_msg, SOSContactState.waiting_contact, F.forward_from)
+    dp.message.register(_setup_sos_msg, SOSContactState.waiting_contact, F.text)
+
+    async def _sos_clear_cmd(message: Message) -> None:
+        if not message.from_user:
+            return
+        await storage.delete_sos_contact(message.from_user.id)
+        s = await storage.get_user_settings(message.from_user.id)
+        await message.answer(t("sos.cleared", s.get("language", "ru")))
+
+    dp.message.register(_sos_clear_cmd, Command("sos_clear"))
+
+    async def _sos_share_cmd(message: Message, state: FSMContext) -> None:
+        if not message.from_user:
+            return
+        contact = await storage.get_sos_contact(message.from_user.id)
+        s = await storage.get_user_settings(message.from_user.id)
+        lang = s.get("language", "ru")
+        if not contact or not contact.get("contact_chat_id"):
+            await _say(message, t("sos.no_contact", lang))
+            return
+        await state.set_state(SOSContactState.waiting_share_location)
+        await message.answer(t("sos.share_intro", lang), reply_markup=location_kb())
+
+    dp.message.register(_sos_share_cmd, Command("sos_share"))
+
+    async def _sos_share_location(message: Message, state: FSMContext) -> None:
+        if not message.from_user or not message.location:
+            return
+        contact = await storage.get_sos_contact(message.from_user.id)
+        if not contact or not contact.get("contact_chat_id"):
+            await state.clear()
+            await _say(message, "Доверенный контакт не задан.")
+            return
+        u = message.from_user
+        full_name = f"{u.first_name or ''} {u.last_name or ''}".strip() or (
+            f"@{u.username}" if u.username else "пользователь СПАС"
+        )
+        text = render_sos_message(
+            name=full_name,
+            lat=message.location.latitude,
+            lon=message.location.longitude,
+            note=None,
+        )
+        delivered = False
+        if message.bot is not None:
+            try:
+                await message.bot.send_message(
+                    chat_id=int(contact["contact_chat_id"]), text=text, disable_web_page_preview=False
+                )
+                delivered = True
+            except Exception as exc:
+                log.warning("sos send failed: %s", exc)
+        await state.clear()
+        await storage.log_event(message.from_user.id, "sos_share", "ok" if delivered else "fail")
+        if delivered:
+            await message.answer(
+                f"📨 Отправлено {contact.get('display_name') or 'контакту'}. " "Не забудь набрать 112.",
+                reply_markup=ReplyKeyboardRemove(),
+            )
+        else:
+            await message.answer(
+                "❗ Не получилось отправить (контакт мог не открывать с тобой бота). "
+                "Скопируй текст ниже и пришли вручную:\n\n" + text,
+                reply_markup=ReplyKeyboardRemove(),
+            )
+
+    dp.message.register(_sos_share_location, SOSContactState.waiting_share_location, F.location)
+
+    # ---- teacher mode: /teacher, /teacher_dashboard, /join ---------------
+
+    async def _teacher_cmd(message: Message, state: FSMContext) -> None:
+        if not message.from_user:
+            return
+        s = await storage.get_user_settings(message.from_user.id)
+        lang = s.get("language", "ru")
+        await state.set_state(TeacherState.naming)
+        await message.answer(t("teacher.intro", lang) + "\n\n" + t("teacher.ask_name", lang))
+
+    dp.message.register(_teacher_cmd, Command("teacher"))
+
+    async def _teacher_name_text(message: Message, state: FSMContext) -> None:
+        if not message.from_user or not message.text:
+            return
+        name = message.text.strip()
+        if not name:
+            await _say(message, "Имя не должно быть пустым.")
+            return
+        cls = await storage.create_class(message.from_user.id, name)
+        s = await storage.get_user_settings(message.from_user.id)
+        lang = s.get("language", "ru")
+        await message.answer(t("teacher.created", lang, name=cls["name"], code=cls["invite_code"]))
+        await state.clear()
+
+    dp.message.register(_teacher_name_text, TeacherState.naming, F.text)
+
+    async def _teacher_dashboard_cmd(message: Message) -> None:
+        if not message.from_user:
+            return
+        classes = await storage.list_classes_by_teacher(message.from_user.id)
+        s = await storage.get_user_settings(message.from_user.id)
+        lang = s.get("language", "ru")
+        if not classes:
+            await message.answer(t("teacher.no_classes", lang))
+            return
+        await _say(message, "📋 Твои классы:", reply_markup=teacher_classes_kb(classes))
+
+    dp.message.register(_teacher_dashboard_cmd, Command("teacher_dashboard"))
+
+    async def _teacher_new_cb(cb: CallbackQuery, state: FSMContext) -> None:
+        if not cb.from_user or not isinstance(cb.message, Message):
+            await cb.answer()
+            return
+        await state.set_state(TeacherState.naming)
+        s = await storage.get_user_settings(cb.from_user.id)
+        await cb.message.answer(t("teacher.ask_name", s.get("language", "ru")))
+        await cb.answer()
+
+    dp.callback_query.register(_teacher_new_cb, F.data == "teacher:new")
+
+    async def _teacher_view_cb(cb: CallbackQuery) -> None:
+        if not cb.data or not cb.from_user or not isinstance(cb.message, Message):
+            await cb.answer()
+            return
+        class_id = int(cb.data.split(":", 1)[1])
+        classes = await storage.list_classes_by_teacher(cb.from_user.id)
+        match = next((c for c in classes if c["id"] == class_id), None)
+        if not match:
+            await cb.answer("Класс не найден")
+            return
+        progress = await storage.class_progress(class_id)
+        await cb.message.answer(render_class_progress(match, progress))
+        await cb.answer()
+
+    dp.callback_query.register(_teacher_view_cb, F.data.startswith("teacher_view:"))
+
+    async def _join_cmd(message: Message, state: FSMContext, command: CommandObject) -> None:
+        if not message.from_user:
+            return
+        code = (command.args or "").strip().upper()
+        s = await storage.get_user_settings(message.from_user.id)
+        lang = s.get("language", "ru")
+        if not code:
+            await message.answer("Использование: <code>/join CODE</code>")
+            return
+        cls = await storage.class_by_code(code)
+        if not cls:
+            await message.answer(t("join.bad_code", lang))
+            return
+        await state.set_state(JoinClassState.waiting_nickname)
+        await state.update_data(class_id=cls["id"], class_name=cls["name"])
+        await message.answer(t("join.ask_nickname", lang))
+
+    dp.message.register(_join_cmd, Command("join"))
+
+    async def _join_nickname_text(message: Message, state: FSMContext) -> None:
+        if not message.from_user or not message.text:
+            return
+        nickname = message.text.strip()[:40]
+        data = await state.get_data()
+        class_id = int(data.get("class_id", 0))
+        class_name = str(data.get("class_name", ""))
+        s = await storage.get_user_settings(message.from_user.id)
+        lang = s.get("language", "ru")
+        if not class_id:
+            await state.clear()
+            await message.answer(t("join.bad_code", lang))
+            return
+        ok = await storage.join_class(class_id, message.from_user.id, nickname)
+        await state.clear()
+        if ok:
+            await message.answer(t("join.ok", lang, class_name=class_name, nickname=nickname))
+        else:
+            await message.answer(t("join.already", lang))
+
+    dp.message.register(_join_nickname_text, JoinClassState.waiting_nickname, F.text)
+
+    # ---- family share: /share_progress, /share_certificate ---------------
+
+    async def _share_progress_cmd(message: Message) -> None:
+        if not message.from_user or message.bot is None:
+            return
+        u = message.from_user
+        full_name = f"{u.first_name or ''} {u.last_name or ''}".strip()
+        xp_state = await storage.get_xp(u.id)
+        me = await message.bot.get_me()
+        username = me.username or "spasai_bot"
+        text = share_progress_text(full_name=full_name or None, xp_state=xp_state, bot_username=username)
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📨 Отправить родителям", url=telegram_share_url(text))]
+            ]
+        )
+        await message.answer("📣 <b>Поделиться прогрессом</b>\n\n<code>" + text + "</code>", reply_markup=kb)
+        grant = await _grant_xp(u.id, "shared")
+        await _maybe_celebrate(message, grant)
+
+    dp.message.register(_share_progress_cmd, Command("share_progress"))
+
+    async def _share_certificate_cmd(message: Message) -> None:
+        if not message.from_user or message.bot is None:
+            return
+        cur = await storage.db.execute(
+            "SELECT code, full_name FROM certificates WHERE user_id=? ORDER BY id DESC LIMIT 1",
+            (message.from_user.id,),
+        )
+        row = await cur.fetchone()
+        if not row:
+            await _say(
+                message,
+                "Сертификата ещё нет. Заверши минимум "
+                f"{CERTIFICATE_THRESHOLD} сценариев и забери: /certificate",
+            )
+            return
+        code, full_name = row[0], row[1]
+        me = await message.bot.get_me()
+        username = me.username or "spasai_bot"
+        text = share_certificate_text(full_name=full_name, code=code, bot_username=username)
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📨 Отправить родителям", url=telegram_share_url(text))]
+            ]
+        )
+        await message.answer(
+            "🎓 <b>Поделиться сертификатом</b>\n\n<code>" + text + "</code>", reply_markup=kb
+        )
+        grant = await _grant_xp(message.from_user.id, "shared")
+        await _maybe_celebrate(message, grant)
+
+    dp.message.register(_share_certificate_cmd, Command("share_certificate"))
+
+    # ---- voice STT (Yandex SpeechKit, optional) --------------------------
+
+    async def _voice_handler(message: Message, state: FSMContext) -> None:
+        if not message.voice or not message.from_user or message.bot is None:
+            return
+        if not stt_enabled():
+            await _say(
+                message,
+                "🎤 Распознавание голоса пока выключено. Напиши вопрос текстом.",
+            )
+            return
+        try:
+            file = await message.bot.get_file(message.voice.file_id)
+            buffer = await message.bot.download_file(file.file_path)
+            audio = buffer.read() if hasattr(buffer, "read") else bytes(buffer)
+        except Exception as exc:
+            log.warning("voice download failed: %s", exc)
+            await _say(message, "Не получилось скачать голосовое. Попробуй текстом.")
+            return
+        text = await transcribe_ogg(audio)
+        if not text:
+            await _say(
+                message,
+                "Не разобрал голосовое. Попробуй ещё раз или напиши текстом.",
+            )
+            return
+        await storage.log_event(message.from_user.id, "voice_stt", text[:200])
+        await message.answer(f"🎤 Я услышал: <i>{text}</i>")
+        answer = await ask_llm(text)
+        if answer:
+            await message.answer(answer, reply_markup=main_menu_kb())
+        else:
+            await message.answer(
+                "Свободные вопросы пока не подключены. Попробуй сценарий из меню.",
+                reply_markup=main_menu_kb(),
+            )
+        _ = state
+
+    dp.message.register(_voice_handler, F.voice)
+
+    # ---- end of new commands; fallback below -----------------------------
 
     async def _fallback_text(message: Message, state: FSMContext) -> None:
         if not message.from_user:

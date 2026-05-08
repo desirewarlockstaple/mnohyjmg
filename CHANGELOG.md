@@ -6,6 +6,61 @@
 
 ## [Unreleased]
 
+### Added — block C/D/E/G (ноябрь 2025)
+* **Геймификация (C4):** XP, 8 уровней («Новичок» → «Легенда»), 10 ачивок,
+  серия «дни подряд», команда `/profile`. Модуль `bot/gamification.py`.
+* **Учительский режим (C5):** `/teacher` — завести класс, `/join CODE` —
+  присоединиться, `/teacher_dashboard` — прогресс класса по XP. Таблицы
+  `classes`, `class_members` (см. `bot/migrations.py` m003). Модуль
+  `bot/teacher.py`.
+* **SOS-режим (C3):** `/sos_contact` — добавить доверенный контакт,
+  `/sos_share` — разовая отправка геолокации + текста, `/sos_clear` —
+  удалить контакт. Таблица `sos_contacts`. Модуль `bot/sos.py`.
+* **Семейный share (C6):** `/share_progress`, `/share_certificate` —
+  готовые тексты для `t.me/share/url`. Модуль `bot/sharing.py`.
+* **Доступность (C9):** `/accessibility` — переключение plain-text режима
+  (без эмодзи и HTML), хранится в `user_settings`. Модуль
+  `bot/accessibility.py`.
+* **Голосовой ввод (C1):** распознавание `voice` через Yandex SpeechKit —
+  опционально, gracefully degrade при отсутствии `YANDEX_STT_API_KEY`.
+  Модуль `bot/stt.py`.
+* **REST API (C10):** aiohttp-сервер на `API_PORT=8090` с CORS-разрешением.
+  Эндпойнты: `/api/health`, `/api/scenarios`, `/api/scenarios/{id}`,
+  `/api/aed`, `/api/dispatcher`, `/api/panic`. Модуль `bot/api.py`.
+* **PWA (E6):** `landing/manifest.webmanifest` + `service-worker.js` +
+  install-prompt в `landing/index.html`. Виджет `landing/widget.js` для
+  встраивания в школьные сайты.
+* **i18n (RU/EN):** минимальный словарь в `bot/i18n.py` для новых команд.
+* **Дашборд (D1–D6):** когортный retention по неделям, NPS-хитмэп,
+  поведенческая воронка `/start → завершение → сертификат`, A/B-варианты
+  по эксперименту, лидерборд XP. См. `dashboard.py`.
+* **Throttle (G4):** middleware `bot/middleware/throttle.py` — sliding
+  window per-user, по умолчанию 5 событий/сек. Конфиг через `THROTTLE_RATE`,
+  `THROTTLE_PER`.
+* **JSON-логирование (G5):** `bot/log_setup.py` — переключение через
+  `LOG_FORMAT=json|human`, опциональная интеграция Sentry (`SENTRY_DSN`).
+* **Liveness-эндпойнт (G6):** `bot/health.py` на `HEALTH_PORT=8080` для
+  Fly.io / Railway healthchecks. JSON-ответ со счётчиком пользователей,
+  событий, размером БД.
+* **Миграции (G7):** легковесный механизм без Alembic — `bot/migrations.py`,
+  таблица `_migrations`, идемпотентные шаги `m001…m005`.
+* **Pre-commit (G2):** `.pre-commit-config.yaml` — ruff-check + ruff-format
+  + standard hooks (trailing-whitespace, end-of-file-fixer, json/yaml/toml
+  валидация).
+* **Покрытие тестами:** добавлены `tests/test_gamification.py`,
+  `test_sos_module.py`, `test_accessibility.py`, `test_i18n.py`,
+  `test_sharing.py`, `test_throttle.py` — 70 unit-тестов.
+* **Презентация (E2):** `docs/jury_deck.md` переписан под Marp — рендерится
+  в PDF/PPTX через `npx @marp-team/marp-cli`.
+* **Финансовая модель (E3):** `docs/finance_model.md` — расходы по годам,
+  источники грантов, P&L, чувствительность.
+* **Дорожная карта (E4):** `docs/roadmap.md` — Mermaid Gantt 2026–2028 +
+  ключевые ворота + риски.
+* **Governance + 152-ФЗ (E5):** `docs/governance_152fz.md` — модель данных,
+  согласия для несовершеннолетних, удаление, безопасность, план АНО.
+* **Docker Compose (G):** `docker-compose.yml` для одной команды
+  `docker compose up` — бот + healthcheck + опц. дашборд.
+
 ### Added
 * Panic-режим (`/panic`): дыхательное упражнение 6 вдохов/мин,
   triage по симптомам, упражнение 5-4-3-2-1 grounding.
