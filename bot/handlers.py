@@ -127,6 +127,10 @@ def location_kb() -> ReplyKeyboardMarkup:
 
 
 def step_kb(scenario_id: str, idx: int, total: int, phone: str) -> InlineKeyboardMarkup:
+    # Telegram inline keyboards do not allow tel:// URLs.
+    # The phone number is rendered in the step text instead, where Telegram
+    # mobile clients auto-detect it as a tappable link.
+    _ = phone
     rows = []
     nav: list[InlineKeyboardButton] = []
     if idx > 0:
@@ -135,7 +139,6 @@ def step_kb(scenario_id: str, idx: int, total: int, phone: str) -> InlineKeyboar
         nav.append(InlineKeyboardButton(text="шаг вперёд »", callback_data=f"step:{scenario_id}:{idx+1}"))
     if nav:
         rows.append(nav)
-    rows.append([InlineKeyboardButton(text=f"📞 Позвонить {phone}", url=f"tel:{phone}")])
     if idx == total - 1:
         rows.append(
             [InlineKeyboardButton(text="✅ Завершить и пройти тест", callback_data=f"end:{scenario_id}")]
@@ -646,6 +649,7 @@ def register_handlers(dp: Dispatcher, *, storage: Storage, content_dir: Path) ->
         text = (
             f"{scenario.icon} <b>{scenario.title}</b>\n"
             f"<i>{scenario.summary}</i>\n\n"
+            f"📞 Экстренный: <code>{scenario.phone}</code>\n\n"
             f"<b>Шаг {idx + 1}/{len(scenario.steps)}</b>\n\n"
             f"{scenario.steps[idx]}"
         )
