@@ -24,6 +24,56 @@
 
 ---
 
+## Состояние API-ключей (получено от автора)
+
+> ⚠️ **БЕЗОПАСНОСТЬ:** реальные значения ключей **НЕ записаны в этот документ и не закоммичены в репо**.
+> Они лежат локально в `~/.devin/spas_credentials.env` (chmod 600) на машине Devin и доступны только в текущей сессии.
+> **Ключи были переданы в открытом чате — рекомендуется ротировать оба после конкурса.**
+>
+> Для использования в будущих сессиях нужно сохранить их в Devin Secrets через UI:
+> https://app.devin.ai/settings/secrets — `User-scoped` для `GIGACHAT_*` и `YANDEX_API_KEY`.
+
+| Переменная | Статус | Что работает | Что нужно поправить |
+|---|---|---|---|
+| `GIGACHAT_API_KEY` (base64 auth key) | ✅ работает | OAuth → access_token, list models (`GigaChat-2-Pro`, `Max`, и т. д.) | — |
+| `GIGACHAT_CLIENT_ID` | ✅ получен | используется в RqUID при OAuth | — |
+| `GIGACHAT_SCOPE=GIGACHAT_API_PERS` | ✅ работает | personal scope активен | для production-нагрузки понадобится `GIGACHAT_API_B2B` или `_CORP` |
+| `YANDEX_API_KEY` (Yandex Cloud / AI Studio) | ⚠️ **ключ валидный, но 403 PermissionDenied** на TTS и YandexGPT | парсится, отправляется в `Authorization: Api-Key` | сервис-аккаунт владельца ключа не имеет ролей `ai.speechkit-tts.user`, `ai.speechkit-stt.user`, `ai.languageModels.user`, `ai.vision.user` |
+
+### Как починить Yandex 403
+
+В Yandex Cloud Console (https://console.cloud.yandex.ru) или через `yc` CLI:
+
+```bash
+# 1. Узнать SA, который владеет ключом
+yc iam access-key list  # найти ключ AQVN... → service_account_id
+
+# 2. Дать ему нужные роли в нужном фолдере (folder_id виден в URL консоли)
+SA_ID=<service_account_id_из_шага_1>
+FOLDER_ID=<твой_folder_id>
+for ROLE in ai.speechkit-tts.user ai.speechkit-stt.user ai.languageModels.user ai.vision.user; do
+  yc resource-manager folder add-access-binding $FOLDER_ID \
+    --role $ROLE \
+    --subject serviceAccount:$SA_ID
+done
+```
+
+После этого SpeechKit TTS, STT, Yandex Vision OCR и YandexGPT начнут отвечать 200 OK с этим же ключом.
+
+**Альтернативно** (если ты делал ключ через AI Studio web-интерфейс, а не через консоль):
+- AI Studio выдаёт IAM-токены, не Api-Key. Тогда нужно (а) создать service account в Cloud Console, (б) выдать ему ключ через `yc iam api-key create --service-account-id <SA>`, (в) выдать роли как выше.
+
+### Что это разблокирует
+
+| TODO-пункт | Был статус | Стало (после фикса прав) |
+|---|---|---|
+| **A3** TTS озвучка шагов | заглушка ждала ключ | можно реализовать сразу |
+| **C1** voice STT | заглушка `bot/stt.py` уже есть | заработает с тем же `YANDEX_API_KEY` |
+| **C2** GigaChat Vision | ждал GigaChat-Pro | **GigaChat работает, можно реализовать сейчас** (только нужен `GigaChat-2-Pro` для image input) |
+| **A5 (новое)** Yandex Vision OCR для коробок с лекарствами | не было в роадмапе | можно добавить (читаем срок годности и состав с фото) |
+
+---
+
 ## БЛОК A. Контент и медицинская валидация
 
 ### A1. 🚨 👥 Договор с врачом-ментором — НЕ СДЕЛАНО
