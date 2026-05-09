@@ -24,23 +24,34 @@
 
 ---
 
-## Состояние API-ключей (получено от автора)
+## Состояние API-ключей
 
-> ⚠️ **БЕЗОПАСНОСТЬ:** реальные значения ключей **НЕ записаны в этот документ и не закоммичены в репо**.
-> Они лежат локально в `~/.devin/spas_credentials.env` (chmod 600) на машине Devin и доступны только в текущей сессии.
-> **Ключи были переданы в открытом чате — рекомендуется ротировать оба после конкурса.**
->
-> Для использования в будущих сессиях нужно сохранить их в Devin Secrets через UI:
-> https://app.devin.ai/settings/secrets — `User-scoped` для `GIGACHAT_*` и `YANDEX_API_KEY`.
+> ⚠️ **БЕЗОПАСНОСТЬ:** реальные значения ключей **НЕ хранятся в репо**. Они лежат локально в `~/.devin/spas_credentials.env` (chmod 600) на машине Devin.
+> Чтобы ключи остались в будущих сессиях — сохранить через UI Devin: https://app.devin.ai/settings/secrets, scope **User**.
+> Ключи были присланы в открытом чате — **рекомендуется ротировать после конкурса**.
 
-| Переменная | Статус | Что работает | Что нужно поправить |
-|---|---|---|---|
-| `GIGACHAT_API_KEY` (base64 auth key) | ✅ работает | OAuth → access_token, list models (`GigaChat-2-Pro`, `Max`, и т. д.) | — |
-| `GIGACHAT_CLIENT_ID` | ✅ получен | используется в RqUID при OAuth | — |
-| `GIGACHAT_SCOPE=GIGACHAT_API_PERS` | ✅ работает | personal scope активен | для production-нагрузки понадобится `GIGACHAT_API_B2B` или `_CORP` |
-| `YANDEX_API_KEY` (Yandex Cloud / AI Studio) | ⚠️ **ключ валидный, но 403 PermissionDenied** на TTS и YandexGPT | парсится, отправляется в `Authorization: Api-Key` | сервис-аккаунт владельца ключа не имеет ролей `ai.speechkit-tts.user`, `ai.speechkit-stt.user`, `ai.languageModels.user`, `ai.vision.user` |
+### На сегодня активен один ключ — GigaChat ✅
 
-### Как починить Yandex 403
+| Переменная | Статус |
+|---|---|
+| `GIGACHAT_API_KEY` (base64 auth key) | ✅ работает (проверено живым OAuth → 200 OK) |
+| `GIGACHAT_CLIENT_ID` | ✅ получен |
+| `GIGACHAT_SCOPE=GIGACHAT_API_PERS` | ✅ работает (personal scope) |
+
+Доступные модели на этом scope: `GigaChat`, `GigaChat-2`, `GigaChat-2-Pro`, `GigaChat-2-Max`, `GigaChat-Max`, `GigaChat-Plus`, `GigaChat-Pro`.
+
+Это разблокирует все LLM-запросы бота: ассистент-чат (`bot/llm.py`) уже использует именно эти переменные. Vision (C2) — реализуется на тех же ключах через `GigaChat-2-Pro` + `/files` endpoint.
+
+### Yandex AI Studio — отложено до победы в конкурсе ⏸️
+
+`YANDEX_API_KEY` получен, но при тесте отдаёт **HTTP 403 PermissionDenied** (сервис-аккаунт не имеет ролей `ai.speechkit-tts.user`, `ai.speechkit-stt.user`, `ai.languageModels.user`, `ai.vision.user`).
+
+По решению автора: **чинить права и подключать Yandex SpeechKit/Vision — после победы в конкурсе** (см. фазу «Post-win expansion» внизу). До этого момента все Yandex-зависимые задачи (A3 TTS, C1 STT, A5 OCR) переведены в статус **«отложено»**.
+
+Если всё-таки понадобится починить раньше — раздел инструкций ниже.
+
+<details>
+<summary>Инструкция по фиксу Yandex 403 (для будущего)</summary>
 
 В Yandex Cloud Console (https://console.cloud.yandex.ru) или через `yc` CLI:
 
@@ -58,19 +69,9 @@ for ROLE in ai.speechkit-tts.user ai.speechkit-stt.user ai.languageModels.user a
 done
 ```
 
-После этого SpeechKit TTS, STT, Yandex Vision OCR и YandexGPT начнут отвечать 200 OK с этим же ключом.
+Если ключ из AI Studio web-интерфейса — там IAM-токены, не Api-Key. Тогда (а) создать SA в Cloud Console, (б) `yc iam api-key create --service-account-id <SA>`, (в) выдать роли как выше.
 
-**Альтернативно** (если ты делал ключ через AI Studio web-интерфейс, а не через консоль):
-- AI Studio выдаёт IAM-токены, не Api-Key. Тогда нужно (а) создать service account в Cloud Console, (б) выдать ему ключ через `yc iam api-key create --service-account-id <SA>`, (в) выдать роли как выше.
-
-### Что это разблокирует
-
-| TODO-пункт | Был статус | Стало (после фикса прав) |
-|---|---|---|
-| **A3** TTS озвучка шагов | заглушка ждала ключ | можно реализовать сразу |
-| **C1** voice STT | заглушка `bot/stt.py` уже есть | заработает с тем же `YANDEX_API_KEY` |
-| **C2** GigaChat Vision | ждал GigaChat-Pro | **GigaChat работает, можно реализовать сейчас** (только нужен `GigaChat-2-Pro` для image input) |
-| **A5 (новое)** Yandex Vision OCR для коробок с лекарствами | не было в роадмапе | можно добавить (читаем срок годности и состав с фото) |
+</details>
 
 ---
 
@@ -93,13 +94,15 @@ done
 - Параллельно с A1: после читки врачом получить хотя бы 5–10 точечных правок, внести их в `content/scenarios.json` и закоммитить с автором правок в commit message.
 - Обновить `risk_register.md` — снять R1 с red на yellow.
 
-### A3. 🟡 🤖 💰 Yandex SpeechKit TTS озвучка шагов — НЕ СДЕЛАНО
+### A3. ⏸️ 🤖 💰 Yandex SpeechKit TTS озвучка шагов — ОТЛОЖЕНО до победы
+
+> Yandex-ключ получен, но 403 PermissionDenied. По решению автора — делаем после конкурса.
 
 - **Что:** для каждого шага сценария — кнопка «🔊 Слушать», которая шлёт `voice` с озвучкой через Yandex SpeechKit TTS (голос `oksana` или `ermil`, скорость 1.0).
 - **Что у меня уже есть:** STT (распознавание) — модуль `bot/stt.py`. TTS (синтез) — нужно добавить новый модуль `bot/tts.py`.
-- **Стоимость:** Yandex free-tier — 100 ₽ кредитов = ~50 000 символов = ~200 шагов. Должно хватить на демо.
+- **Стоимость:** Yandex free-tier — 100 ₽ кредитов = ~50 000 символов = ~200 шагов.
 - **Шаги:**
-  1. Получить `YANDEX_TTS_API_KEY` (тот же ключ, что для STT).
+  1. Починить права у SA в Yandex Cloud (см. раздел «Состояние API-ключей»).
   2. Написать `bot/tts.py` с `synthesize(text: str, voice: str = "oksana") -> bytes` (возвращает OGG Opus).
   3. Добавить кнопку «🔊 Слушать» к каждому шагу сценария.
   4. Кэшировать сгенерированные voice в SQLite по hash(text, voice) — чтобы не платить дважды.
@@ -172,21 +175,24 @@ done
 
 ## БЛОК C. Технические фичи
 
-### C1. ✅ Голосовое управление — СДЕЛАНО (PR #2)
+### C1. ⏸️ Голосовое управление (STT) — код ✅ СДЕЛАНО, активация отложена
 
-`bot/stt.py` + handler принимает voice → распознаёт → ищет сценарий.
+`bot/stt.py` написан в PR #2 и слушает `YANDEX_API_KEY`. Заработает автоматически после фикса прав в Yandex Cloud (отложено до победы в конкурсе).
 
-### C2. 🟡 🤖 💰 GigaChat Vision — НЕ СДЕЛАНО
+### C2. 🟡 🤖 GigaChat Vision — МОЖНО ДЕЛАТЬ (ключ есть)
 
-- **Что:** юзер фоткает рану/ожог → бот через GigaChat Vision API определяет тип/степень → советует сценарий.
+- **Что:** юзер фоткает рану/ожог → бот через GigaChat Vision определяет тип/степень → советует сценарий.
 - **Внимание:** НЕ диагноз, а триаж + «звони 112».
-- **Стоимость:** GigaChat Pro / SaluteSpeech API — ~10 ₽/запрос. Нужен соответствующий тариф.
+- **Ключ:** `GIGACHAT_API_KEY` (scope `GIGACHAT_API_PERS`) — ✅ работает на сегодня. Используем модель `GigaChat-2-Pro`, она поддерживает image input через `/files` endpoint.
+- **Стоимость:** на personal scope — фикс. лимит сообщений в месяц, на B2B — ~10 ₽/запрос. Personal достаточно для пилота.
 - **Шаги:**
-  1. Получить GigaChat Pro key (или попросить у Сбера в рамках партнёрства, F1).
-  2. Написать `bot/vision.py` с `analyze_photo(file: bytes) -> {"category": str, "severity": str, "scenario_id": str}`.
-  3. Добавить handler: пользователь шлёт фото → `vision.analyze_photo` → бот предлагает сценарий + дисклеймер.
-  4. Тесты — мок API.
-- **Срок:** 2 дня + договор с Сбером.
+  1. Написать `bot/vision.py`:
+     - `upload_image(file: bytes) -> file_id` (POST `/api/v1/files` с `multipart/form-data`).
+     - `analyze_photo(file_id: str) -> {"category": str, "severity": str, "scenario_id": str}` (chat completion с `attachments=[file_id]` и system-prompt про триаж).
+  2. Handler: `@dp.message(F.photo)` → скачать → `upload_image` → `analyze_photo` → ответ с сценарием + дисклеймер.
+  3. Тесты — мок API.
+  4. Rate-limit отдельно от throttle: не больше 5 фото/час/user (vision дороже текста).
+- **Срок:** 1 день.
 - **Балл:** +4 (инновация).
 
 ### C3. ✅ SOS+geo — СДЕЛАНО (PR #2)
@@ -497,9 +503,9 @@ Heatmap «сценарий × NPS-балл».
 4. **E6 icons:** сгенерировать PNG-иконки 192/512 через PIL.
 5. **E1:** SVG-логотип + `docs/brand_guide.md`.
 6. **C8 (полный):** прокачать i18n + EN-перевод всех строк UI + `/lang` команда.
-7. **A3:** `bot/tts.py` + кнопка «🔊 Слушать» в шагах сценариев (с graceful degrade при отсутствии `YANDEX_TTS_API_KEY`).
+7. ~~A3: TTS через Yandex~~ ⏸️ отложено до победы (ждём фикс прав в Yandex Cloud).
 8. **C7:** `bot/mchs_rss.py` + `/subscribe_alerts`.
-9. **C2:** `bot/vision.py` + handler для photo (graceful degrade при отсутствии Pro key).
+9. **C2:** `bot/vision.py` + handler для photo — **ключ GigaChat есть, можно делать сразу**.
 10. **G1 final:** добавить pytest --cov в CI workflow.
 11. **G8/G9:** README badges + Dependabot.
 12. **H1:** Audit log таблица.
@@ -515,9 +521,19 @@ Heatmap «сценарий × NPS-балл».
 ## Что НЕ могу сделать никак
 
 - Все, что в 👥 (требуют людей): A1, A2, A4, B1–B5, F1–F4.
-- A3, C2, D6 без получения соответствующих API-ключей (работают, но не активны).
 - C7, если МЧС RSS-канал недоступен извне.
 - B5/E7 финальная видеозапись — нет камеры/микрофона.
+- D6 (Sentry) — до получения `SENTRY_DSN`.
+
+## Отложено до победы в конкурсе ⏸️
+
+Делаем, если выиграем и будет бюджет / именной сервис-аккаунт в Yandex Cloud:
+
+- **A3** TTS озвучка шагов (Yandex SpeechKit).
+- **C1** активация STT (код уже в PR #2, ждёт прав SA).
+- **A5** Yandex Vision OCR для коробок с лекарствами.
+
+По этим пунктам ключ уже есть — но у его SA нет нужных ролей, см. раздел «Состояние API-ключей».
 
 ---
 
