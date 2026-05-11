@@ -1,0 +1,167 @@
+.home-root {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  padding: clamp(20px, 4vw, 48px);
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+.home-header {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 32px;
+  align-items: end;
+}
+@media (max-width: 720px) {
+  .home-header {
+    grid-template-columns: 1fr;
+  }
+}
+.home-eyebrow {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--fg-2);
+}
+.home-title {
+  font-size: clamp(28px, 4vw, 44px);
+  font-weight: 800;
+  margin: 6px 0 8px;
+  letter-spacing: -0.02em;
+  background: linear-gradient(135deg, #f5f7fb, #b8c0d7);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.home-stats {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: var(--fg-1);
+}
+.home-blurb {
+  color: var(--fg-1);
+  max-width: 520px;
+  font-size: 15px;
+}
+.home-section-title {
+  font-size: 14px;
+  margin: 0 0 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--fg-2);
+}
+
+.konspekt-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 14px;
+}
+.konspekt-card {
+  text-align: left;
+  background: linear-gradient(180deg, rgba(28, 39, 66, 0.55), rgba(19, 26, 44, 0.55));
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 14px;
+  padding: 16px;
+  color: var(--fg-0);
+  font-family: inherit;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: transform 0.05s ease, border-color 0.15s ease, background 0.2s ease;
+}
+.konspekt-card:hover {
+  border-color: rgba(255, 255, 255, 0.18);
+  transform: translateY(-1px);
+}
+.konspekt-card.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), 0 10px 40px rgba(108, 92, 231, 0.25);
+}
+.konspekt-subject {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--accent-2);
+}
+.konspekt-title {
+  font-weight: 700;
+  font-size: 17px;
+}
+.konspekt-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.konspekt-tag {
+  background: rgba(108, 92, 231, 0.18);
+  color: var(--fg-1);
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+}
+
+.game-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 16px;
+}
+.game-card {
+  border-radius: 18px;
+  padding: 22px;
+  position: relative;
+  overflow: hidden;
+  background-size: 200% 200%;
+  background-position: 0% 0%;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: white;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 200px;
+  isolation: isolate;
+}
+.game-card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at 80% 0%, rgba(255, 255, 255, 0.18), transparent 50%),
+    radial-gradient(ellipse at 0% 100%, rgba(0, 0, 0, 0.5), transparent 50%);
+  z-index: -1;
+}
+.game-card-tag {
+  align-self: flex-start;
+  background: rgba(0, 0, 0, 0.3);
+  padding: 2px 10px;
+  font-size: 11px;
+  border-radius: 999px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.game-card-title {
+  font-size: 24px;
+  font-weight: 800;
+}
+.game-card-desc {
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.92);
+  flex: 1;
+}
+.game-card-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.home-footer {
+  font-size: 12px;
+  max-width: 800px;
+}
+.home-footer code {
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 6px;
+  border-radius: 6px;
+  font-size: 11px;
+}

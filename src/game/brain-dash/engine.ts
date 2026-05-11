@@ -1,0 +1,1169 @@
+import * as THREE from 'three';
+import type { AnswerEvent, QuizQuestion } from '../common/types';
+import type { BrainDashConfig } from './config';
+import type {
+  ActivePickup,
+  ActiveQuestion,
+  BrainDashHud,
+  BrainDashStatus,
+} from './types';
+
+const FORWARD = -1; // forward direction along z
+
+interface ObstacleObj {
+  mesh: THREE.Mesh;
+  kind: 'low' | 'high' | 'full';
+  lane: number;
+}
+
+interface CoinObj {
+  mesh: THREE.Mesh;
+  lane: number;
+}
+
+interface PickupObj {
+  mesh: THREE.Mesh;
+  lane: number;
+  kind: ActivePickup['kind'];
+}
+
+interface GatePlate {
+  mesh: THREE.Mesh;
+  lane: 0 | 1 | 2;
+  optionId: string;
+  texture: THREE.CanvasTexture;
+}
+
+interface ActiveGate {
+  questionId: string;
+  question: QuizQuestion;
+  zTrigger: number;
+  laneToOptionId: Record<0 | 1 | 2, string>;
+  plates: GatePlate[];
+  resolved: boolean;
+  spawnedAtMs: number;
+  spawnedAtDistance: number;
+}
+
+export interface BrainDashEngineHandlers {
+  onHudChange: (hud: BrainDashHud) => void;
+  onAnswer: (event: AnswerEvent) => void;
+  onFinished: (summary: {
+    score: number;
+    coins: number;
+    questionsAsked: number;
+    questionsCorrect: number;
+    distance: number;
+    durationMs: number;
+    perQuestion: AnswerEvent[];
+  }) => void;
+}
+
+export interface BrainDashEngineOptions {
+  canvas: HTMLCanvasElement;
+  questions: QuizQuestion[];
+  fetchMoreQuestions?: (n: number) => Promise<QuizQuestion[]>;
+  config: BrainDashConfig;
+  handlers: BrainDashEngineHandlers;
+  reducedMotion: boolean;
+}
+
+type Status = BrainDashStatus;
+
+const LANE_OFFSETS = (cfg: BrainDashConfig) => [-cfg.laneWidth, 0, cfg.laneWidth];
+
+export class BrainDashEngine {
+  private readonly cfg: BrainDashConfig;
+  private readonly canvas: HTMLCanvasElement;
+  private readonly handlers: BrainDashEngineHandlers;
+  private readonly reducedMotion: boolean;
+
+  private renderer!: THREE.WebGLRenderer;
+  private scene!: THREE.Scene;
+  private camera!: THREE.PerspectiveCamera;
+
+  private playerGroup!: THREE.Group;
+  private playerBox!: THREE.Mesh;
+  private playerHead!: THREE.Mesh;
+  private playerShadow!: THREE.Mesh;
+  private lanePositions: number[];
+
+  // ground
+  private groundTiles: THREE.Mesh[] = [];
+  private sideStripes: THREE.Mesh[] = [];
+
+  // moving objects
+  private obstacles: ObstacleObj[] = [];
+  private coins: CoinObj[] = [];
+  private pickups: PickupObj[] = [];
+  private gates: ActiveGate[] = [];
+
+  // pools / shared materials
+  private mats = {
+    obstacleLow: new THREE.MeshStandardMaterial({ color: 0xff5470, roughness: 0.5, metalness: 0.1 }),
+    obstacleHigh: new THREE.MeshStandardMaterial({ color: 0xffb547, roughness: 0.5, metalness: 0.1 }),
+    obstacleFull: new THREE.MeshStandardMaterial({ color: 0xff7866, roughness: 0.5, metalness: 0.1 }),
+    coin: new THREE.MeshStandardMaterial({ color: 0xffd34a, roughness: 0.3, metalness: 0.6, emissive: 0x553300, emissiveIntensity: 0.6 }),
+    pickupShield: new THREE.MeshStandardMaterial({ color: 0x00b894, emissive: 0x004436, emissiveIntensity: 0.5 }),
+    pickupMagnet: new THREE.MeshStandardMaterial({ color: 0x6c5ce7, emissive: 0x2a2470, emissiveIntensity: 0.5 }),
+    pickupX2: new THREE.MeshStandardMaterial({ color: 0xff79c6, emissive: 0x5a1e44, emissiveIntensity: 0.5 }),
+    pickupBoost: new THREE.MeshStandardMaterial({ color: 0x4cd964, emissive: 0x1b5a25, emissiveIntensity: 0.5 }),
+    ground: new THREE.MeshStandardMaterial({ color: 0x1b2440, roughness: 0.95, metalness: 0 }),
+    groundAlt: new THREE.MeshStandardMaterial({ color: 0x141c33, roughness: 0.95, metalness: 0 }),
+    stripeWhite: new THREE.MeshBasicMaterial({ color: 0xf6f7fb }),
+    sky: new THREE.Color(0x0b0f1a),
+    player: new THREE.MeshStandardMaterial({ color: 0x6c5ce7, roughness: 0.4, metalness: 0.3 }),
+    playerHead: new THREE.MeshStandardMaterial({ color: 0xf5d6c6, roughness: 0.6 }),
+    playerHit: new THREE.MeshStandardMaterial({ color: 0xff5470, roughness: 0.4 }),
+    shadow: new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35 }),
+  };
+
+  private geos = {
+    coin: new THREE.CylinderGeometry(0.35, 0.35, 0.08, 18),
+    pickup: new THREE.IcosahedronGeometry(0.4, 0),
+    low: new THREE.BoxGeometry(1.6, 0.7, 0.6),
+    high: new THREE.BoxGeometry(1.6, 0.25, 0.4),
+    full: new THREE.BoxGeometry(1.6, 2.0, 0.6),
+    playerBody: new THREE.BoxGeometry(0.7, 1.0, 0.7),
+    playerHead: new THREE.SphereGeometry(0.32, 18, 16),
+    shadow: new THREE.CircleGeometry(0.55, 24),
+    ground: new THREE.PlaneGeometry(10, 1),
+    gatePlate: new THREE.BoxGeometry(1.8, 1.6, 0.12),
+  };
+
+  // player state
+  private playerLane = 1;
+  private playerTargetX = 0;
+  private playerY = 0;
+  private playerVY = 0;
+  private playerState: 'running' | 'jumping' | 'sliding' | 'hit' | 'dead' = 'running';
+  private playerStateTimer = 0;
+  private hitInvulnTimer = 0;
+
+  // game state
+  private status: Status = 'INTRO';
+  private elapsedMs = 0;
+  private startedAtMs = 0;
+  private distance = 0;
+  private lives = 0;
+  private score = 0;
+  private coinsCollected = 0;
+  private combo = 0;
+  private multiplier = 1;
+  private activePickups: ActivePickup[] = [];
+  private nextQuestionAtDistance = 0;
+  private questionPool: QuizQuestion[];
+  private questionCursor = 0;
+  private currentQuestion: ActiveQuestion | undefined;
+  private answers: AnswerEvent[] = [];
+  private lastExplanation: string | undefined;
+  private lastExplanationTimer = 0;
+  private fetchMoreQuestions: BrainDashEngineOptions['fetchMoreQuestions'];
+  private prefetching = false;
+
+  // spawn timers
+  private obstacleTimer = 0;
+  private coinTimer = 0;
+  private pickupTimer = 8;
+
+  // countdown
+  private countdownTimer = 0;
+
+  // loop
+  private rafId: number | null = null;
+  private lastTimeMs = 0;
+  private fixedDt = 1 / 60;
+  private accumulatorMs = 0;
+  private destroyed = false;
+
+  // input
+  private keyHandler: (e: KeyboardEvent) => void;
+  private blurHandler: () => void;
+  private resizeObserver?: ResizeObserver;
+  private touchStart: { x: number; y: number; t: number } | null = null;
+  private touchEndHandler?: (e: TouchEvent) => void;
+  private touchStartHandler?: (e: TouchEvent) => void;
+
+  // hud
+  private lastHud: BrainDashHud | null = null;
+
+  constructor(opts: BrainDashEngineOptions) {
+    this.canvas = opts.canvas;
+    this.cfg = opts.config;
+    this.handlers = opts.handlers;
+    this.reducedMotion = opts.reducedMotion;
+    this.questionPool = [...opts.questions];
+    this.fetchMoreQuestions = opts.fetchMoreQuestions;
+    this.lives = this.cfg.livesMax;
+    this.lanePositions = LANE_OFFSETS(this.cfg);
+    this.nextQuestionAtDistance = this.cfg.questionEveryMeters * 0.7;
+    this.keyHandler = this.onKey.bind(this);
+    this.blurHandler = () => {
+      if (this.status === 'RUNNING') {
+        this.setStatus('PAUSED');
+      }
+    };
+
+    this.initThree();
+    this.initWorld();
+    this.bindInput();
+    this.emitHud();
+  }
+
+  // ----- public -----
+
+  start() {
+    if (this.destroyed) return;
+    this.startedAtMs = performance.now();
+    this.lastTimeMs = this.startedAtMs;
+    this.countdownTimer = 3;
+    this.setStatus('COUNTDOWN');
+    this.tick();
+  }
+
+  pause() {
+    if (this.status === 'RUNNING' || this.status === 'COUNTDOWN') {
+      this.setStatus('PAUSED');
+    }
+  }
+
+  resume() {
+    if (this.status === 'PAUSED') {
+      this.setStatus('RUNNING');
+      this.lastTimeMs = performance.now();
+    }
+  }
+
+  togglePause() {
+    if (this.status === 'PAUSED') this.resume();
+    else this.pause();
+  }
+
+  destroy() {
+    this.destroyed = true;
+    if (this.rafId !== null) cancelAnimationFrame(this.rafId);
+    window.removeEventListener('keydown', this.keyHandler);
+    window.removeEventListener('blur', this.blurHandler);
+    if (this.touchStartHandler)
+      this.canvas.removeEventListener('touchstart', this.touchStartHandler);
+    if (this.touchEndHandler)
+      this.canvas.removeEventListener('touchend', this.touchEndHandler);
+    this.resizeObserver?.disconnect();
+    this.renderer.dispose();
+    // dispose materials & geometries
+    for (const g of Object.values(this.geos)) g.dispose();
+    for (const m of Object.values(this.mats)) {
+      if (m instanceof THREE.Material) m.dispose();
+    }
+    for (const g of this.gates) {
+      for (const p of g.plates) {
+        (p.mesh.material as THREE.Material).dispose();
+        p.texture.dispose();
+      }
+    }
+  }
+
+  // ----- init -----
+
+  private initThree() {
+    this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true });
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.renderer.shadowMap.enabled = !this.reducedMotion;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+    this.scene = new THREE.Scene();
+    this.scene.background = this.mats.sky;
+    this.scene.fog = new THREE.Fog(0x0b0f1a, 30, 80);
+
+    this.camera = new THREE.PerspectiveCamera(60, 1, 0.1, 200);
+    this.camera.position.set(0, 4.5, 8);
+    this.camera.lookAt(0, 1, -4);
+
+    const ambient = new THREE.AmbientLight(0x8aa0d6, 0.55);
+    this.scene.add(ambient);
+
+    const dir = new THREE.DirectionalLight(0xffffff, 0.85);
+    dir.position.set(-4, 8, 6);
+    dir.castShadow = !this.reducedMotion;
+    if (dir.castShadow) {
+      dir.shadow.mapSize.set(1024, 1024);
+      dir.shadow.camera.left = -8;
+      dir.shadow.camera.right = 8;
+      dir.shadow.camera.top = 8;
+      dir.shadow.camera.bottom = -8;
+      dir.shadow.camera.near = 1;
+      dir.shadow.camera.far = 40;
+    }
+    this.scene.add(dir);
+
+    const rim = new THREE.PointLight(0x6c5ce7, 1.2, 25);
+    rim.position.set(0, 5, -10);
+    this.scene.add(rim);
+
+    this.resize();
+    this.resizeObserver = new ResizeObserver(() => this.resize());
+    this.resizeObserver.observe(this.canvas.parentElement ?? this.canvas);
+  }
+
+  private initWorld() {
+    // Player
+    this.playerGroup = new THREE.Group();
+    this.playerBox = new THREE.Mesh(this.geos.playerBody, this.mats.player);
+    this.playerBox.position.y = 0.5;
+    this.playerBox.castShadow = true;
+    this.playerHead = new THREE.Mesh(this.geos.playerHead, this.mats.playerHead);
+    this.playerHead.position.y = 1.3;
+    this.playerHead.castShadow = true;
+    this.playerShadow = new THREE.Mesh(this.geos.shadow, this.mats.shadow);
+    this.playerShadow.rotation.x = -Math.PI / 2;
+    this.playerShadow.position.y = 0.02;
+    this.playerGroup.add(this.playerBox);
+    this.playerGroup.add(this.playerHead);
+    this.playerGroup.add(this.playerShadow);
+    this.playerGroup.position.set(0, 0, 0);
+    this.scene.add(this.playerGroup);
+
+    // Ground tiles
+    const tileLen = this.cfg.worldChunkLength;
+    const numTiles = 8;
+    for (let i = 0; i < numTiles; i++) {
+      const g = new THREE.PlaneGeometry(this.cfg.laneWidth * 3 + 4, tileLen);
+      const mat = i % 2 === 0 ? this.mats.ground : this.mats.groundAlt;
+      const mesh = new THREE.Mesh(g, mat);
+      mesh.rotation.x = -Math.PI / 2;
+      mesh.position.z = -i * tileLen + tileLen / 2;
+      mesh.receiveShadow = true;
+      this.scene.add(mesh);
+      this.groundTiles.push(mesh);
+    }
+
+    // Lane stripes
+    for (let lane = 0; lane <= 1; lane++) {
+      const x = -this.cfg.laneWidth / 2 + lane * this.cfg.laneWidth;
+      for (let i = 0; i < 24; i++) {
+        const sg = new THREE.PlaneGeometry(0.12, 1.4);
+        const stripe = new THREE.Mesh(sg, this.mats.stripeWhite);
+        stripe.rotation.x = -Math.PI / 2;
+        stripe.position.set(x, 0.03, -i * 3 + 6);
+        this.scene.add(stripe);
+        this.sideStripes.push(stripe);
+      }
+    }
+
+    // Side walls
+    for (const side of [-1, 1]) {
+      const wallGeo = new THREE.BoxGeometry(0.5, 1.4, tileLen * numTiles);
+      const wallMat = new THREE.MeshStandardMaterial({
+        color: 0x2a3a66,
+        roughness: 0.9,
+      });
+      const wall = new THREE.Mesh(wallGeo, wallMat);
+      wall.position.set(side * (this.cfg.laneWidth * 1.7), 0.7, -tileLen * numTiles * 0.5 + tileLen / 2);
+      this.scene.add(wall);
+    }
+  }
+
+  private resize() {
+    const parent = this.canvas.parentElement;
+    if (!parent) return;
+    const w = parent.clientWidth;
+    const h = parent.clientHeight;
+    if (w <= 0 || h <= 0) return;
+    this.renderer.setSize(w, h, false);
+    this.camera.aspect = w / h;
+    this.camera.updateProjectionMatrix();
+  }
+
+  // ----- input -----
+
+  private bindInput() {
+    window.addEventListener('keydown', this.keyHandler);
+    window.addEventListener('blur', this.blurHandler);
+
+    this.touchStartHandler = (e: TouchEvent) => {
+      const t = e.touches[0];
+      if (!t) return;
+      this.touchStart = { x: t.clientX, y: t.clientY, t: performance.now() };
+    };
+    this.touchEndHandler = (e: TouchEvent) => {
+      if (!this.touchStart) return;
+      const t = e.changedTouches[0];
+      if (!t) return;
+      const dx = t.clientX - this.touchStart.x;
+      const dy = t.clientY - this.touchStart.y;
+      const dt = performance.now() - this.touchStart.t;
+      this.touchStart = null;
+      if (dt > 600) return;
+      const absX = Math.abs(dx);
+      const absY = Math.abs(dy);
+      if (absX < 20 && absY < 20) {
+        this.actionJump();
+      } else if (absX > absY) {
+        if (dx > 0) this.actionLane(1);
+        else this.actionLane(-1);
+      } else if (dy > 0) {
+        this.actionSlide();
+      } else {
+        this.actionJump();
+      }
+    };
+    this.canvas.addEventListener('touchstart', this.touchStartHandler, { passive: true });
+    this.canvas.addEventListener('touchend', this.touchEndHandler, { passive: true });
+  }
+
+  private onKey(e: KeyboardEvent) {
+    if (this.destroyed) return;
+    const k = e.key.toLowerCase();
+    if (k === 'escape' || k === 'p') {
+      this.togglePause();
+      e.preventDefault();
+      return;
+    }
+    if (this.status !== 'RUNNING') return;
+    switch (k) {
+      case 'arrowleft':
+      case 'a':
+        this.actionLane(-1);
+        e.preventDefault();
+        break;
+      case 'arrowright':
+      case 'd':
+        this.actionLane(1);
+        e.preventDefault();
+        break;
+      case 'arrowup':
+      case 'w':
+      case ' ':
+      case 'space':
+      case 'spacebar':
+        this.actionJump();
+        e.preventDefault();
+        break;
+      case 'arrowdown':
+      case 's':
+        this.actionSlide();
+        e.preventDefault();
+        break;
+    }
+  }
+
+  private actionLane(dir: -1 | 1) {
+    const target = Math.max(0, Math.min(2, this.playerLane + dir));
+    if (target !== this.playerLane) {
+      this.playerLane = target;
+      this.playerTargetX = this.lanePositions[target];
+    }
+  }
+
+  private actionJump() {
+    if (this.playerState === 'running') {
+      this.playerState = 'jumping';
+      const jumpInitial =
+        (2 * this.cfg.jumpHeight) / (this.cfg.jumpDuration / 2);
+      this.playerVY = jumpInitial;
+    }
+  }
+
+  private actionSlide() {
+    if (this.playerState === 'running') {
+      this.playerState = 'sliding';
+      this.playerStateTimer = this.cfg.slideDuration;
+    }
+  }
+
+  // ----- main loop -----
+
+  private tick = () => {
+    if (this.destroyed) return;
+    this.rafId = requestAnimationFrame(this.tick);
+    const now = performance.now();
+    let frameMs = now - this.lastTimeMs;
+    this.lastTimeMs = now;
+    if (frameMs > 100) frameMs = 100;
+
+    if (this.status === 'PAUSED' || this.status === 'RESULTS') {
+      this.renderer.render(this.scene, this.camera);
+      return;
+    }
+
+    if (this.status === 'COUNTDOWN') {
+      this.countdownTimer -= frameMs / 1000;
+      this.animateIdle(frameMs / 1000);
+      this.emitHud();
+      if (this.countdownTimer <= 0) {
+        this.setStatus('RUNNING');
+      }
+      this.renderer.render(this.scene, this.camera);
+      return;
+    }
+
+    this.accumulatorMs += frameMs;
+    const dtMs = this.fixedDt * 1000;
+    let safety = 0;
+    while (this.accumulatorMs >= dtMs && safety < 5) {
+      this.update(this.fixedDt);
+      this.accumulatorMs -= dtMs;
+      safety++;
+    }
+
+    this.animatePlayer(frameMs / 1000);
+    this.updateCamera();
+    this.renderer.render(this.scene, this.camera);
+  };
+
+  private animateIdle(dt: number) {
+    this.playerY = 0;
+    this.playerGroup.position.x +=
+      (this.playerTargetX - this.playerGroup.position.x) *
+      Math.min(1, this.cfg.laneSwitchSpeed * dt);
+    this.playerHead.rotation.y = Math.sin(performance.now() / 300) * 0.1;
+  }
+
+  private update(dt: number) {
+    if (this.status !== 'RUNNING') return;
+    this.elapsedMs += dt * 1000;
+
+    const speed = this.currentSpeed();
+    const deltaZ = speed * dt;
+    this.distance += deltaZ;
+
+    // Move player forward (in -z)
+    this.playerGroup.position.z += FORWARD * deltaZ;
+
+    // Smooth lane switch
+    this.playerGroup.position.x +=
+      (this.playerTargetX - this.playerGroup.position.x) *
+      Math.min(1, this.cfg.laneSwitchSpeed * dt);
+
+    // Player state machine for jump/slide
+    this.updatePlayerState(dt);
+
+    // Hit invulnerability
+    if (this.hitInvulnTimer > 0) this.hitInvulnTimer -= dt;
+
+    // Spawn ahead
+    this.obstacleTimer -= dt;
+    this.coinTimer -= dt;
+    this.pickupTimer -= dt;
+    if (this.obstacleTimer <= 0) {
+      this.spawnObstacleRow();
+      this.obstacleTimer = this.cfg.obstacleEverySec * (0.7 + Math.random() * 0.5);
+    }
+    if (this.coinTimer <= 0) {
+      this.spawnCoinRun();
+      this.coinTimer = this.cfg.coinEverySec * (0.8 + Math.random() * 0.4);
+    }
+    if (this.pickupTimer <= 0) {
+      this.spawnPickup();
+      this.pickupTimer = 12 + Math.random() * 8;
+    }
+    if (this.distance >= this.nextQuestionAtDistance && !this.currentQuestion) {
+      this.spawnQuestionGate();
+    }
+
+    // Move world: nothing to move, since player moves; but garbage collect.
+    this.cullBehind();
+
+    // Animate spinning coins/pickups
+    for (const c of this.coins) {
+      c.mesh.rotation.y += dt * 6;
+    }
+    for (const p of this.pickups) {
+      p.mesh.rotation.y += dt * 3;
+      p.mesh.position.y = 0.9 + Math.sin(this.elapsedMs / 400 + p.mesh.position.x) * 0.15;
+    }
+    for (const g of this.gates) {
+      for (const p of g.plates) {
+        const mat = p.mesh.material as THREE.MeshBasicMaterial;
+        mat.opacity = 0.92;
+      }
+    }
+
+    // Collisions
+    this.detectCollisions();
+
+    // Resolve gates passed
+    this.resolveGates();
+
+    // Active pickup timers
+    for (const pk of this.activePickups) {
+      pk.remainingMs -= dt * 1000;
+    }
+    this.activePickups = this.activePickups.filter((p) => p.remainingMs > 0);
+    this.multiplier = this.activePickups.find((p) => p.kind === 'x2') ? 2 : 1;
+
+    // Explanation flash decay
+    if (this.lastExplanationTimer > 0) {
+      this.lastExplanationTimer -= dt;
+      if (this.lastExplanationTimer <= 0) {
+        this.lastExplanation = undefined;
+      }
+    }
+
+    // Score from distance
+    this.score += deltaZ * 0.5 * this.multiplier;
+
+    // Prefetch more questions when running low
+    if (
+      !this.prefetching &&
+      this.fetchMoreQuestions &&
+      this.questionPool.length - this.questionCursor <= 2
+    ) {
+      this.prefetching = true;
+      this.fetchMoreQuestions(5)
+        .then((more) => {
+          this.questionPool.push(...more);
+        })
+        .catch(() => {
+          // Silent — gate spawn will simply stop once pool runs out.
+        })
+        .finally(() => {
+          this.prefetching = false;
+        });
+    }
+
+    this.emitHud();
+  }
+
+  private currentSpeed(): number {
+    const elapsedSec = this.elapsedMs / 1000;
+    const raw = this.cfg.baseSpeed + this.cfg.speedRamp * Math.sqrt(elapsedSec);
+    const boosted = this.activePickups.some((p) => p.kind === 'boost') ? raw * 1.4 : raw;
+    return Math.min(boosted, this.cfg.maxSpeed);
+  }
+
+  private updatePlayerState(dt: number) {
+    if (this.playerState === 'jumping') {
+      const gravity = -((2 * this.cfg.jumpHeight) /
+        Math.pow(this.cfg.jumpDuration / 2, 2));
+      this.playerVY += gravity * dt;
+      this.playerY += this.playerVY * dt;
+      if (this.playerY <= 0) {
+        this.playerY = 0;
+        this.playerVY = 0;
+        this.playerState = 'running';
+      }
+    } else if (this.playerState === 'sliding') {
+      this.playerStateTimer -= dt;
+      if (this.playerStateTimer <= 0) {
+        this.playerState = 'running';
+      }
+    } else if (this.playerState === 'hit') {
+      this.playerStateTimer -= dt;
+      if (this.playerStateTimer <= 0) {
+        this.playerState = 'running';
+        (this.playerBox.material as THREE.Material) = this.mats.player;
+        this.playerBox.material = this.mats.player;
+      }
+    }
+  }
+
+  private animatePlayer(dt: number) {
+    this.playerGroup.position.y = this.playerY;
+    if (this.playerState === 'sliding') {
+      this.playerBox.scale.set(1, 0.5, 1);
+      this.playerBox.position.y = 0.25;
+      this.playerHead.position.y = 0.7;
+    } else {
+      this.playerBox.scale.set(1, 1, 1);
+      this.playerBox.position.y = 0.5;
+      this.playerHead.position.y = 1.3;
+    }
+    // Subtle bobbing while running
+    const run = this.playerState === 'running' && this.status === 'RUNNING';
+    if (run && !this.reducedMotion) {
+      this.playerBox.rotation.z = Math.sin(this.elapsedMs / 90) * 0.05;
+      this.playerHead.rotation.y = Math.sin(this.elapsedMs / 220) * 0.15;
+    } else {
+      this.playerBox.rotation.z = 0;
+    }
+    // Hit flash
+    if (this.hitInvulnTimer > 0) {
+      this.playerBox.material =
+        Math.floor(this.elapsedMs / 80) % 2 === 0
+          ? this.mats.playerHit
+          : this.mats.player;
+    } else {
+      this.playerBox.material = this.mats.player;
+    }
+    void dt;
+  }
+
+  private updateCamera() {
+    const target = this.playerGroup.position;
+    const desired = new THREE.Vector3(target.x * 0.5, 4.6, target.z + 7.5);
+    this.camera.position.lerp(desired, 0.15);
+    this.camera.lookAt(target.x * 0.3, 1.2, target.z - 4);
+  }
+
+  // ----- spawning -----
+
+  private spawnObstacleRow() {
+    const spawnZ = this.playerGroup.position.z - 80;
+    const kinds: ObstacleObj['kind'][] = ['low', 'high', 'full'];
+    const occupied = new Set<number>();
+    // 1 or 2 obstacles, never blocking all 3 lanes simultaneously without alt
+    const count = Math.random() < 0.65 ? 1 : 2;
+    for (let i = 0; i < count; i++) {
+      let lane = Math.floor(Math.random() * 3);
+      let tries = 0;
+      while (occupied.has(lane) && tries < 5) {
+        lane = (lane + 1) % 3;
+        tries++;
+      }
+      occupied.add(lane);
+      const kind = kinds[Math.floor(Math.random() * kinds.length)];
+      let geo: THREE.BufferGeometry;
+      let mat: THREE.Material;
+      let yPos = 0.35;
+      switch (kind) {
+        case 'low':
+          geo = this.geos.low;
+          mat = this.mats.obstacleLow;
+          yPos = 0.35;
+          break;
+        case 'high':
+          geo = this.geos.high;
+          mat = this.mats.obstacleHigh;
+          yPos = 1.45;
+          break;
+        case 'full':
+          geo = this.geos.full;
+          mat = this.mats.obstacleFull;
+          yPos = 1.0;
+          break;
+      }
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.castShadow = !this.reducedMotion;
+      mesh.position.set(this.lanePositions[lane], yPos, spawnZ);
+      this.scene.add(mesh);
+      this.obstacles.push({ mesh, kind, lane });
+    }
+  }
+
+  private spawnCoinRun() {
+    const spawnZ = this.playerGroup.position.z - 80;
+    const lane = Math.floor(Math.random() * 3);
+    const len = 3 + Math.floor(Math.random() * 4);
+    for (let i = 0; i < len; i++) {
+      const mesh = new THREE.Mesh(this.geos.coin, this.mats.coin);
+      mesh.position.set(this.lanePositions[lane], 0.6, spawnZ - i * 1.4);
+      mesh.rotation.x = Math.PI / 2;
+      this.scene.add(mesh);
+      this.coins.push({ mesh, lane });
+    }
+  }
+
+  private spawnPickup() {
+    const spawnZ = this.playerGroup.position.z - 80;
+    const lane = Math.floor(Math.random() * 3);
+    const kindRoll = Math.random();
+    let kind: ActivePickup['kind'];
+    let mat: THREE.Material;
+    if (kindRoll < 0.35) {
+      kind = 'shield';
+      mat = this.mats.pickupShield;
+    } else if (kindRoll < 0.6) {
+      kind = 'magnet';
+      mat = this.mats.pickupMagnet;
+    } else if (kindRoll < 0.8) {
+      kind = 'x2';
+      mat = this.mats.pickupX2;
+    } else {
+      kind = 'boost';
+      mat = this.mats.pickupBoost;
+    }
+    const mesh = new THREE.Mesh(this.geos.pickup, mat);
+    mesh.position.set(this.lanePositions[lane], 1.1, spawnZ);
+    this.scene.add(mesh);
+    this.pickups.push({ mesh, lane, kind });
+  }
+
+  private spawnQuestionGate() {
+    if (this.questionCursor >= this.questionPool.length) {
+      // Out of questions — extend interval to avoid spamming attempts.
+      this.nextQuestionAtDistance = this.distance + this.cfg.questionEveryMeters;
+      return;
+    }
+    const question = this.questionPool[this.questionCursor++];
+    const spawnZ = this.playerGroup.position.z - 60;
+    // Pick 3 options: correct + 2 distractors (or all if there are 3).
+    const correctOpt = question.options.find((o) => o.id === question.correctOptionId);
+    if (!correctOpt) return;
+    const others = question.options.filter((o) => o.id !== correctOpt.id);
+    const distractors = shuffle(others).slice(0, 2);
+    const lineup = shuffle([correctOpt, ...distractors]);
+    const laneToOptionId: Record<0 | 1 | 2, string> = {
+      0: lineup[0].id,
+      1: lineup[1].id,
+      2: lineup[2].id,
+    };
+
+    const plates: GatePlate[] = [];
+    for (let lane: 0 | 1 | 2 = 0; lane <= 2; lane = (lane + 1) as 0 | 1 | 2) {
+      const opt = lineup[lane];
+      const texture = makeLabelTexture(opt.text);
+      const mat = new THREE.MeshBasicMaterial({
+        map: texture,
+        transparent: true,
+        opacity: 0.9,
+      });
+      const mesh = new THREE.Mesh(this.geos.gatePlate, mat);
+      mesh.position.set(this.lanePositions[lane], 1.4, spawnZ);
+      this.scene.add(mesh);
+      plates.push({ mesh, lane, optionId: opt.id, texture });
+      if (lane === 2) break;
+    }
+
+    const gate: ActiveGate = {
+      questionId: question.id,
+      question,
+      zTrigger: spawnZ,
+      laneToOptionId,
+      plates,
+      resolved: false,
+      spawnedAtMs: this.elapsedMs,
+      spawnedAtDistance: this.distance,
+    };
+    this.gates.push(gate);
+    this.currentQuestion = {
+      question,
+      laneToOptionId,
+      spawnedAt: this.elapsedMs,
+      resolveAtDistance: this.distance + this.cfg.questionResolveAfterMeters,
+      resolved: false,
+    };
+    this.nextQuestionAtDistance =
+      this.distance + this.cfg.questionEveryMeters + 80;
+  }
+
+  // ----- collisions -----
+
+  private playerHitbox(): { minX: number; maxX: number; minY: number; maxY: number; minZ: number; maxZ: number } {
+    const px = this.playerGroup.position.x;
+    const pz = this.playerGroup.position.z;
+    const py = this.playerY;
+    const sliding = this.playerState === 'sliding';
+    const halfW = 0.35;
+    const halfD = 0.35;
+    const minY = py + (sliding ? 0 : 0);
+    const maxY = py + (sliding ? 0.5 : 1.5);
+    return {
+      minX: px - halfW,
+      maxX: px + halfW,
+      minY,
+      maxY,
+      minZ: pz - halfD,
+      maxZ: pz + halfD,
+    };
+  }
+
+  private detectCollisions() {
+    const pb = this.playerHitbox();
+
+    // Coins
+    const magnetActive = this.activePickups.some((p) => p.kind === 'magnet');
+    const remainingCoins: CoinObj[] = [];
+    for (const c of this.coins) {
+      if (magnetActive && Math.abs(c.mesh.position.z - this.playerGroup.position.z) < 5) {
+        c.mesh.position.x += (this.playerGroup.position.x - c.mesh.position.x) * 0.2;
+        c.mesh.position.y += (1 - c.mesh.position.y) * 0.15;
+      }
+      const dx = c.mesh.position.x - this.playerGroup.position.x;
+      const dz = c.mesh.position.z - this.playerGroup.position.z;
+      const dy = c.mesh.position.y - (this.playerY + 0.6);
+      if (Math.abs(dx) < 0.55 && Math.abs(dz) < 0.55 && Math.abs(dy) < 1.0) {
+        this.coinsCollected += 1;
+        this.score += 5 * this.multiplier;
+        this.scene.remove(c.mesh);
+        continue;
+      }
+      remainingCoins.push(c);
+    }
+    this.coins = remainingCoins;
+
+    // Pickups
+    const remainingPickups: PickupObj[] = [];
+    for (const p of this.pickups) {
+      const dx = p.mesh.position.x - this.playerGroup.position.x;
+      const dz = p.mesh.position.z - this.playerGroup.position.z;
+      if (Math.abs(dx) < 0.7 && Math.abs(dz) < 0.7) {
+        this.applyPickup(p.kind);
+        this.scene.remove(p.mesh);
+        continue;
+      }
+      remainingPickups.push(p);
+    }
+    this.pickups = remainingPickups;
+
+    // Obstacles
+    const remainingObs: ObstacleObj[] = [];
+    for (const o of this.obstacles) {
+      const dz = o.mesh.position.z - this.playerGroup.position.z;
+      // Box test approx
+      const dx = o.mesh.position.x - this.playerGroup.position.x;
+      const sameLane = Math.abs(dx) < 1.0;
+      const closeZ = dz > -0.6 && dz < 0.6;
+      if (sameLane && closeZ && this.hitInvulnTimer <= 0) {
+        const passLow = o.kind === 'low' && pb.minY > 0.8;
+        const passHigh = o.kind === 'high' && this.playerState === 'sliding';
+        if (!passLow && !passHigh) {
+          this.onHit('obstacle');
+          this.scene.remove(o.mesh);
+          continue;
+        }
+      }
+      remainingObs.push(o);
+    }
+    this.obstacles = remainingObs;
+  }
+
+  private resolveGates() {
+    const remainingGates: ActiveGate[] = [];
+    for (const g of this.gates) {
+      if (!g.resolved && this.playerGroup.position.z <= g.zTrigger + 0.2) {
+        // Crossed gate
+        const lane = this.playerLane as 0 | 1 | 2;
+        const chosenOpt = g.laneToOptionId[lane];
+        const correct = chosenOpt === g.question.correctOptionId;
+        const timeMs = this.elapsedMs - g.spawnedAtMs;
+        const ans: AnswerEvent = {
+          questionId: g.question.id,
+          selectedOptionId: chosenOpt,
+          correct,
+          timeToAnswerMs: timeMs,
+          difficulty: g.question.difficulty,
+        };
+        this.answers.push(ans);
+        this.handlers.onAnswer(ans);
+        g.resolved = true;
+        if (correct) {
+          this.combo += 1;
+          this.score += 100 * this.multiplier + g.question.difficulty * 10;
+          this.coinsCollected += 5;
+        } else {
+          this.combo = 0;
+          this.onHit('wrong_answer');
+        }
+        if (g.question.explanation) {
+          this.lastExplanation = g.question.explanation;
+          this.lastExplanationTimer = 2.5;
+        }
+        this.currentQuestion = undefined;
+      }
+      // Despawn behind player
+      if (this.playerGroup.position.z < g.zTrigger - 6) {
+        for (const p of g.plates) {
+          this.scene.remove(p.mesh);
+          (p.mesh.material as THREE.Material).dispose();
+          p.texture.dispose();
+        }
+      } else {
+        remainingGates.push(g);
+      }
+    }
+    this.gates = remainingGates;
+  }
+
+  private applyPickup(kind: ActivePickup['kind']) {
+    if (kind === 'shield') {
+      this.activePickups = this.activePickups.filter((p) => p.kind !== 'shield');
+      this.activePickups.push({ kind: 'shield', remainingMs: 30000 });
+    } else if (kind === 'magnet') {
+      this.activePickups.push({ kind: 'magnet', remainingMs: 5000 });
+    } else if (kind === 'x2') {
+      this.activePickups.push({ kind: 'x2', remainingMs: 5000 });
+    } else if (kind === 'boost') {
+      this.activePickups.push({ kind: 'boost', remainingMs: 3000 });
+      this.hitInvulnTimer = 3;
+    }
+  }
+
+  private onHit(_reason: 'obstacle' | 'wrong_answer') {
+    const hasShield = this.activePickups.some((p) => p.kind === 'shield');
+    if (hasShield) {
+      this.activePickups = this.activePickups.filter((p) => p.kind !== 'shield');
+      this.hitInvulnTimer = 1.2;
+      return;
+    }
+    this.lives -= 1;
+    this.combo = 0;
+    this.hitInvulnTimer = 1.6;
+    this.playerState = 'hit';
+    this.playerStateTimer = 0.6;
+    if (this.lives <= 0) {
+      this.finish();
+    }
+  }
+
+  private cullBehind() {
+    const limit = this.playerGroup.position.z + 6;
+    this.obstacles = this.obstacles.filter((o) => {
+      if (o.mesh.position.z > limit) {
+        this.scene.remove(o.mesh);
+        return false;
+      }
+      return true;
+    });
+    this.coins = this.coins.filter((c) => {
+      if (c.mesh.position.z > limit) {
+        this.scene.remove(c.mesh);
+        return false;
+      }
+      return true;
+    });
+    this.pickups = this.pickups.filter((p) => {
+      if (p.mesh.position.z > limit) {
+        this.scene.remove(p.mesh);
+        return false;
+      }
+      return true;
+    });
+    // recycle ground tiles
+    for (const tile of this.groundTiles) {
+      if (tile.position.z > this.playerGroup.position.z + this.cfg.worldChunkLength) {
+        // move to furthest ahead
+        const furthest = this.groundTiles.reduce(
+          (acc, t) => Math.min(acc, t.position.z),
+          Infinity,
+        );
+        tile.position.z = furthest - this.cfg.worldChunkLength;
+      }
+    }
+  }
+
+  // ----- finish -----
+
+  private finish() {
+    if (this.status === 'GAME_OVER' || this.status === 'RESULTS') return;
+    this.setStatus('GAME_OVER');
+    const summary = {
+      score: Math.round(this.score),
+      coins: this.coinsCollected,
+      questionsAsked: this.answers.length,
+      questionsCorrect: this.answers.filter((a) => a.correct).length,
+      distance: Math.round(this.distance),
+      durationMs: this.elapsedMs,
+      perQuestion: this.answers,
+    };
+    this.handlers.onFinished(summary);
+    this.setStatus('RESULTS');
+  }
+
+  endNow(reason: 'user' | 'finished') {
+    if (reason === 'user') {
+      this.finish();
+    }
+  }
+
+  // ----- HUD plumbing -----
+
+  private setStatus(status: Status) {
+    this.status = status;
+    this.emitHud();
+  }
+
+  private emitHud() {
+    const hud: BrainDashHud = {
+      status: this.status,
+      lives: this.lives,
+      distance: Math.round(this.distance),
+      score: Math.round(this.score),
+      combo: this.combo,
+      multiplier: this.multiplier,
+      coins: this.coinsCollected,
+      speedKmh: Math.round(this.currentSpeed() * 3.6),
+      countdown: this.status === 'COUNTDOWN' ? Math.max(0, Math.ceil(this.countdownTimer)) : undefined,
+      question: this.currentQuestion,
+      lastExplanation: this.lastExplanation,
+      pickups: this.activePickups,
+      questionsAsked: this.answers.length,
+      questionsCorrect: this.answers.filter((a) => a.correct).length,
+    };
+    if (!hudEquals(this.lastHud, hud)) {
+      this.handlers.onHudChange(hud);
+      this.lastHud = hud;
+    }
+  }
+}
+
+function shuffle<T>(arr: T[]): T[] {
+  const out = arr.slice();
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
+function hudEquals(a: BrainDashHud | null, b: BrainDashHud) {
+  if (!a) return false;
+  return (
+    a.status === b.status &&
+    a.lives === b.lives &&
+    a.distance === b.distance &&
+    a.score === b.score &&
+    a.combo === b.combo &&
+    a.multiplier === b.multiplier &&
+    a.coins === b.coins &&
+    a.speedKmh === b.speedKmh &&
+    a.countdown === b.countdown &&
+    a.question?.question.id === b.question?.question.id &&
+    a.lastExplanation === b.lastExplanation &&
+    a.pickups.length === b.pickups.length
+  );
+}
+
+function makeLabelTexture(text: string): THREE.CanvasTexture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 256;
+  const ctx = canvas.getContext('2d')!;
+  // bg
+  const grad = ctx.createLinearGradient(0, 0, 0, canvas.height);
+  grad.addColorStop(0, 'rgba(28,39,66,0.95)');
+  grad.addColorStop(1, 'rgba(11,15,26,0.95)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = 'rgba(108,92,231,0.7)';
+  ctx.lineWidth = 6;
+  ctx.strokeRect(6, 6, canvas.width - 12, canvas.height - 12);
+
+  ctx.fillStyle = '#f5f7fb';
+  ctx.font = 'bold 36px "Inter", system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  wrapText(ctx, text, canvas.width / 2, canvas.height / 2, canvas.width - 60, 42);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.anisotropy = 4;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+function wrapText(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  maxWidth: number,
+  lineHeight: number,
+) {
+  const words = text.split(/\s+/);
+  const lines: string[] = [];
+  let current = '';
+  for (const word of words) {
+    const test = current ? `${current} ${word}` : word;
+    if (ctx.measureText(test).width > maxWidth && current) {
+      lines.push(current);
+      current = word;
+    } else {
+      current = test;
+    }
+  }
+  if (current) lines.push(current);
+  const startY = y - ((lines.length - 1) * lineHeight) / 2;
+  lines.forEach((line, i) => {
+    ctx.fillText(line, x, startY + i * lineHeight);
+  });
+}
