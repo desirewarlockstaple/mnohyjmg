@@ -197,9 +197,9 @@ export class BrainDashEngine {
   private prefetching = false;
 
   // spawn timers
-  private obstacleTimer = 0;
-  private coinTimer = 0;
-  private pickupTimer = 8;
+  private obstacleTimer = 3.5;
+  private coinTimer = 1.5;
+  private pickupTimer = 6;
 
   // countdown
   private countdownTimer = 0;
@@ -901,9 +901,9 @@ export class BrainDashEngine {
 
   private spawnObstacleRow() {
     const spawnZ = this.playerGroup.position.z - 80;
-    // 70% car, 25% cone, 5% barrier — cars dominate per user feedback
+    // 70% car, 22% cone, 8% barrier — cars dominate per user feedback
     const occupied = new Set<number>();
-    const count = Math.random() < 0.62 ? 1 : 2;
+    const count = Math.random() < 0.82 ? 1 : 2;
     for (let i = 0; i < count; i++) {
       let lane = Math.floor(Math.random() * 3);
       let tries = 0;
