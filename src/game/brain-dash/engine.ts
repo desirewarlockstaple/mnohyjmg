@@ -11,9 +11,11 @@ import type {
 const FORWARD = -1; // forward direction along z
 
 interface ObstacleObj {
-  mesh: THREE.Mesh;
-  kind: 'low' | 'high' | 'full';
+  group: THREE.Group;
+  kind: 'car' | 'cone' | 'barrier';
   lane: number;
+  // For cars only — wheel groups for rotation animation
+  wheels?: THREE.Object3D[];
 }
 
 interface CoinObj {
@@ -40,6 +42,7 @@ interface ActiveGate {
   zTrigger: number;
   laneToOptionId: Record<0 | 1 | 2, string>;
   plates: GatePlate[];
+  banner?: { mesh: THREE.Mesh; texture: THREE.CanvasTexture };
   resolved: boolean;
   spawnedAtMs: number;
   spawnedAtDistance: number;
@@ -72,6 +75,14 @@ type Status = BrainDashStatus;
 
 const LANE_OFFSETS = (cfg: BrainDashConfig) => [-cfg.laneWidth, 0, cfg.laneWidth];
 
+const CAR_PALETTE: { body: number; accent: number }[] = [
+  { body: 0xff5470, accent: 0xffd34a }, // red+gold
+  { body: 0x6c5ce7, accent: 0xa6e1ff }, // purple+ice
+  { body: 0x00b894, accent: 0xfff097 }, // green+lemon
+  { body: 0xffb547, accent: 0x1c2742 }, // amber+dark
+  { body: 0xeeeeee, accent: 0xff5470 }, // white+red
+];
+
 export class BrainDashEngine {
   private readonly cfg: BrainDashConfig;
   private readonly canvas: HTMLCanvasElement;
@@ -83,14 +94,18 @@ export class BrainDashEngine {
   private camera!: THREE.PerspectiveCamera;
 
   private playerGroup!: THREE.Group;
-  private playerBox!: THREE.Mesh;
+  private playerTorso!: THREE.Mesh;
   private playerHead!: THREE.Mesh;
+  private playerLeftArm!: THREE.Group;
+  private playerRightArm!: THREE.Group;
+  private playerLeftLeg!: THREE.Group;
+  private playerRightLeg!: THREE.Group;
   private playerShadow!: THREE.Mesh;
   private lanePositions: number[];
 
-  // ground
+  // ground & decor
   private groundTiles: THREE.Mesh[] = [];
-  private sideStripes: THREE.Mesh[] = [];
+  private neonStripes: THREE.Mesh[] = [];
 
   // moving objects
   private obstacles: ObstacleObj[] = [];
@@ -98,37 +113,57 @@ export class BrainDashEngine {
   private pickups: PickupObj[] = [];
   private gates: ActiveGate[] = [];
 
-  // pools / shared materials
+  // shared materials / geometries
   private mats = {
-    obstacleLow: new THREE.MeshStandardMaterial({ color: 0xff5470, roughness: 0.5, metalness: 0.1 }),
-    obstacleHigh: new THREE.MeshStandardMaterial({ color: 0xffb547, roughness: 0.5, metalness: 0.1 }),
-    obstacleFull: new THREE.MeshStandardMaterial({ color: 0xff7866, roughness: 0.5, metalness: 0.1 }),
-    coin: new THREE.MeshStandardMaterial({ color: 0xffd34a, roughness: 0.3, metalness: 0.6, emissive: 0x553300, emissiveIntensity: 0.6 }),
+    coin: new THREE.MeshStandardMaterial({ color: 0xffd34a, roughness: 0.3, metalness: 0.7, emissive: 0x553300, emissiveIntensity: 0.6 }),
     pickupShield: new THREE.MeshStandardMaterial({ color: 0x00b894, emissive: 0x004436, emissiveIntensity: 0.5 }),
     pickupMagnet: new THREE.MeshStandardMaterial({ color: 0x6c5ce7, emissive: 0x2a2470, emissiveIntensity: 0.5 }),
     pickupX2: new THREE.MeshStandardMaterial({ color: 0xff79c6, emissive: 0x5a1e44, emissiveIntensity: 0.5 }),
     pickupBoost: new THREE.MeshStandardMaterial({ color: 0x4cd964, emissive: 0x1b5a25, emissiveIntensity: 0.5 }),
-    ground: new THREE.MeshStandardMaterial({ color: 0x1b2440, roughness: 0.95, metalness: 0 }),
-    groundAlt: new THREE.MeshStandardMaterial({ color: 0x141c33, roughness: 0.95, metalness: 0 }),
+    ground: new THREE.MeshStandardMaterial({ color: 0x161f36, roughness: 0.9, metalness: 0 }),
+    groundAlt: new THREE.MeshStandardMaterial({ color: 0x101728, roughness: 0.95, metalness: 0 }),
     stripeWhite: new THREE.MeshBasicMaterial({ color: 0xf6f7fb }),
-    sky: new THREE.Color(0x0b0f1a),
-    player: new THREE.MeshStandardMaterial({ color: 0x6c5ce7, roughness: 0.4, metalness: 0.3 }),
-    playerHead: new THREE.MeshStandardMaterial({ color: 0xf5d6c6, roughness: 0.6 }),
-    playerHit: new THREE.MeshStandardMaterial({ color: 0xff5470, roughness: 0.4 }),
+    stripeAccent: new THREE.MeshBasicMaterial({ color: 0x6c5ce7 }),
+    stripeAccent2: new THREE.MeshBasicMaterial({ color: 0x00b894 }),
+    skirt: new THREE.MeshStandardMaterial({ color: 0x2a3a66, roughness: 0.9 }),
+    cone: new THREE.MeshStandardMaterial({ color: 0xff7a00, emissive: 0x441f00, emissiveIntensity: 0.4 }),
+    coneStripe: new THREE.MeshBasicMaterial({ color: 0xffffff }),
+    wheel: new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.9 }),
+    glass: new THREE.MeshStandardMaterial({
+      color: 0x9bd6ff,
+      roughness: 0.05,
+      metalness: 0.4,
+      transparent: true,
+      opacity: 0.55,
+    }),
+    headlight: new THREE.MeshStandardMaterial({ color: 0xfff7c2, emissive: 0xfff7c2, emissiveIntensity: 1.4 }),
+    taillight: new THREE.MeshStandardMaterial({ color: 0xff3a3a, emissive: 0xff3a3a, emissiveIntensity: 1.2 }),
+    playerBody: new THREE.MeshStandardMaterial({ color: 0x6c5ce7, roughness: 0.45, metalness: 0.2 }),
+    playerLimb: new THREE.MeshStandardMaterial({ color: 0x4836b8, roughness: 0.5, metalness: 0.2 }),
+    playerSkin: new THREE.MeshStandardMaterial({ color: 0xf5d6c6, roughness: 0.7 }),
+    playerHit: new THREE.MeshStandardMaterial({ color: 0xff5470, roughness: 0.45 }),
     shadow: new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35 }),
   };
 
   private geos = {
     coin: new THREE.CylinderGeometry(0.35, 0.35, 0.08, 18),
     pickup: new THREE.IcosahedronGeometry(0.4, 0),
-    low: new THREE.BoxGeometry(1.6, 0.7, 0.6),
-    high: new THREE.BoxGeometry(1.6, 0.25, 0.4),
-    full: new THREE.BoxGeometry(1.6, 2.0, 0.6),
-    playerBody: new THREE.BoxGeometry(0.7, 1.0, 0.7),
-    playerHead: new THREE.SphereGeometry(0.32, 18, 16),
+    cone: new THREE.ConeGeometry(0.35, 0.9, 12),
+    coneStripe: new THREE.CylinderGeometry(0.32, 0.32, 0.1, 12, 1, true),
+    barrier: new THREE.BoxGeometry(1.6, 0.7, 0.5),
+    carBody: new THREE.BoxGeometry(1.05, 0.45, 2.0),
+    carCabin: new THREE.BoxGeometry(0.9, 0.5, 1.0),
+    carWindshield: new THREE.PlaneGeometry(0.9, 0.5),
+    carWheel: new THREE.CylinderGeometry(0.22, 0.22, 0.18, 16),
+    carHeadlight: new THREE.SphereGeometry(0.08, 8, 8),
+    torso: new THREE.BoxGeometry(0.5, 0.65, 0.35),
+    head: new THREE.SphereGeometry(0.28, 18, 16),
+    armUpper: new THREE.CapsuleGeometry(0.09, 0.35, 4, 8),
+    legUpper: new THREE.CapsuleGeometry(0.11, 0.45, 4, 8),
     shadow: new THREE.CircleGeometry(0.55, 24),
     ground: new THREE.PlaneGeometry(10, 1),
-    gatePlate: new THREE.BoxGeometry(1.8, 1.6, 0.12),
+    gatePlate: new THREE.BoxGeometry(1.7, 1.4, 0.12),
+    gateBanner: new THREE.PlaneGeometry(7.5, 1.2),
   };
 
   // player state
@@ -196,7 +231,7 @@ export class BrainDashEngine {
     this.fetchMoreQuestions = opts.fetchMoreQuestions;
     this.lives = this.cfg.livesMax;
     this.lanePositions = LANE_OFFSETS(this.cfg);
-    this.nextQuestionAtDistance = this.cfg.questionEveryMeters * 0.7;
+    this.nextQuestionAtDistance = this.cfg.questionEveryMeters * 0.5;
     this.keyHandler = this.onKey.bind(this);
     this.blurHandler = () => {
       if (this.status === 'RUNNING') {
@@ -220,25 +255,21 @@ export class BrainDashEngine {
     this.setStatus('COUNTDOWN');
     this.tick();
   }
-
   pause() {
     if (this.status === 'RUNNING' || this.status === 'COUNTDOWN') {
       this.setStatus('PAUSED');
     }
   }
-
   resume() {
     if (this.status === 'PAUSED') {
       this.setStatus('RUNNING');
       this.lastTimeMs = performance.now();
     }
   }
-
   togglePause() {
     if (this.status === 'PAUSED') this.resume();
     else this.pause();
   }
-
   destroy() {
     this.destroyed = true;
     if (this.rafId !== null) cancelAnimationFrame(this.rafId);
@@ -250,7 +281,6 @@ export class BrainDashEngine {
       this.canvas.removeEventListener('touchend', this.touchEndHandler);
     this.resizeObserver?.disconnect();
     this.renderer.dispose();
-    // dispose materials & geometries
     for (const g of Object.values(this.geos)) g.dispose();
     for (const m of Object.values(this.mats)) {
       if (m instanceof THREE.Material) m.dispose();
@@ -260,6 +290,15 @@ export class BrainDashEngine {
         (p.mesh.material as THREE.Material).dispose();
         p.texture.dispose();
       }
+      if (g.banner) {
+        (g.banner.mesh.material as THREE.Material).dispose();
+        g.banner.texture.dispose();
+      }
+    }
+  }
+  endNow(reason: 'user' | 'finished') {
+    if (reason === 'user' || reason === 'finished') {
+      this.finish();
     }
   }
 
@@ -271,20 +310,23 @@ export class BrainDashEngine {
     this.renderer.shadowMap.enabled = !this.reducedMotion;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.05;
 
     this.scene = new THREE.Scene();
-    this.scene.background = this.mats.sky;
-    this.scene.fog = new THREE.Fog(0x0b0f1a, 30, 80);
+    this.scene.background = new THREE.Color(0x0d142a);
+    this.scene.fog = new THREE.FogExp2(0x0d142a, 0.018);
 
-    this.camera = new THREE.PerspectiveCamera(60, 1, 0.1, 200);
+    this.camera = new THREE.PerspectiveCamera(64, 1, 0.1, 200);
     this.camera.position.set(0, 4.5, 8);
     this.camera.lookAt(0, 1, -4);
 
-    const ambient = new THREE.AmbientLight(0x8aa0d6, 0.55);
-    this.scene.add(ambient);
+    // Lights
+    const hemi = new THREE.HemisphereLight(0x6c5ce7, 0x0a0f1c, 0.7);
+    this.scene.add(hemi);
 
-    const dir = new THREE.DirectionalLight(0xffffff, 0.85);
-    dir.position.set(-4, 8, 6);
+    const dir = new THREE.DirectionalLight(0xfff097, 1.05);
+    dir.position.set(-6, 12, 4);
     dir.castShadow = !this.reducedMotion;
     if (dir.castShadow) {
       dir.shadow.mapSize.set(1024, 1024);
@@ -297,9 +339,31 @@ export class BrainDashEngine {
     }
     this.scene.add(dir);
 
-    const rim = new THREE.PointLight(0x6c5ce7, 1.2, 25);
-    rim.position.set(0, 5, -10);
-    this.scene.add(rim);
+    const rimL = new THREE.PointLight(0x6c5ce7, 2.0, 22);
+    rimL.position.set(-5, 4, -8);
+    this.scene.add(rimL);
+    const rimR = new THREE.PointLight(0x00b894, 1.6, 22);
+    rimR.position.set(5, 4, -12);
+    this.scene.add(rimR);
+
+    // Sky gradient via large background plane behind the runner
+    const skyGeo = new THREE.PlaneGeometry(140, 70);
+    const skyCanvas = document.createElement('canvas');
+    skyCanvas.width = 256;
+    skyCanvas.height = 256;
+    const ctx = skyCanvas.getContext('2d')!;
+    const grad = ctx.createLinearGradient(0, 0, 0, skyCanvas.height);
+    grad.addColorStop(0, '#1c0d3a');
+    grad.addColorStop(0.55, '#3c1a59');
+    grad.addColorStop(0.85, '#ff5470');
+    grad.addColorStop(1, '#ffd34a');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, skyCanvas.width, skyCanvas.height);
+    const skyTex = new THREE.CanvasTexture(skyCanvas);
+    const skyMat = new THREE.MeshBasicMaterial({ map: skyTex, fog: false });
+    const sky = new THREE.Mesh(skyGeo, skyMat);
+    sky.position.set(0, 12, -80);
+    this.scene.add(sky);
 
     this.resize();
     this.resizeObserver = new ResizeObserver(() => this.resize());
@@ -307,28 +371,61 @@ export class BrainDashEngine {
   }
 
   private initWorld() {
-    // Player
-    this.playerGroup = new THREE.Group();
-    this.playerBox = new THREE.Mesh(this.geos.playerBody, this.mats.player);
-    this.playerBox.position.y = 0.5;
-    this.playerBox.castShadow = true;
-    this.playerHead = new THREE.Mesh(this.geos.playerHead, this.mats.playerHead);
-    this.playerHead.position.y = 1.3;
-    this.playerHead.castShadow = true;
+    this.buildPlayer();
+    this.buildRoad();
+  }
+
+  private buildPlayer() {
+    const group = new THREE.Group();
+    this.playerTorso = new THREE.Mesh(this.geos.torso, this.mats.playerBody);
+    this.playerTorso.position.y = 0.95;
+    this.playerTorso.castShadow = !this.reducedMotion;
+    group.add(this.playerTorso);
+
+    this.playerHead = new THREE.Mesh(this.geos.head, this.mats.playerSkin);
+    this.playerHead.position.y = 1.55;
+    this.playerHead.castShadow = !this.reducedMotion;
+    group.add(this.playerHead);
+
+    // Hair / hood — small cap to make head more humanoid
+    const hoodGeo = new THREE.SphereGeometry(0.32, 18, 12, 0, Math.PI * 2, 0, Math.PI / 2.1);
+    const hoodMat = new THREE.MeshStandardMaterial({ color: 0x281e6e, roughness: 0.6 });
+    const hood = new THREE.Mesh(hoodGeo, hoodMat);
+    hood.position.y = 1.6;
+    hood.castShadow = !this.reducedMotion;
+    group.add(hood);
+
+    // Arms: pivot at shoulder
+    this.playerLeftArm = makeLimb(this.geos.armUpper, this.mats.playerLimb, 0.18);
+    this.playerLeftArm.position.set(-0.3, 1.2, 0);
+    group.add(this.playerLeftArm);
+    this.playerRightArm = makeLimb(this.geos.armUpper, this.mats.playerLimb, 0.18);
+    this.playerRightArm.position.set(0.3, 1.2, 0);
+    group.add(this.playerRightArm);
+
+    // Legs: pivot at hip
+    this.playerLeftLeg = makeLimb(this.geos.legUpper, this.mats.playerLimb, 0.24);
+    this.playerLeftLeg.position.set(-0.15, 0.65, 0);
+    group.add(this.playerLeftLeg);
+    this.playerRightLeg = makeLimb(this.geos.legUpper, this.mats.playerLimb, 0.24);
+    this.playerRightLeg.position.set(0.15, 0.65, 0);
+    group.add(this.playerRightLeg);
+
     this.playerShadow = new THREE.Mesh(this.geos.shadow, this.mats.shadow);
     this.playerShadow.rotation.x = -Math.PI / 2;
     this.playerShadow.position.y = 0.02;
-    this.playerGroup.add(this.playerBox);
-    this.playerGroup.add(this.playerHead);
-    this.playerGroup.add(this.playerShadow);
-    this.playerGroup.position.set(0, 0, 0);
-    this.scene.add(this.playerGroup);
+    group.add(this.playerShadow);
 
-    // Ground tiles
+    group.position.set(0, 0, 0);
+    this.scene.add(group);
+    this.playerGroup = group;
+  }
+
+  private buildRoad() {
     const tileLen = this.cfg.worldChunkLength;
     const numTiles = 8;
     for (let i = 0; i < numTiles; i++) {
-      const g = new THREE.PlaneGeometry(this.cfg.laneWidth * 3 + 4, tileLen);
+      const g = new THREE.PlaneGeometry(this.cfg.laneWidth * 3 + 6, tileLen);
       const mat = i % 2 === 0 ? this.mats.ground : this.mats.groundAlt;
       const mesh = new THREE.Mesh(g, mat);
       mesh.rotation.x = -Math.PI / 2;
@@ -341,27 +438,147 @@ export class BrainDashEngine {
     // Lane stripes
     for (let lane = 0; lane <= 1; lane++) {
       const x = -this.cfg.laneWidth / 2 + lane * this.cfg.laneWidth;
-      for (let i = 0; i < 24; i++) {
-        const sg = new THREE.PlaneGeometry(0.12, 1.4);
+      for (let i = 0; i < 30; i++) {
+        const sg = new THREE.PlaneGeometry(0.14, 1.5);
         const stripe = new THREE.Mesh(sg, this.mats.stripeWhite);
         stripe.rotation.x = -Math.PI / 2;
         stripe.position.set(x, 0.03, -i * 3 + 6);
         this.scene.add(stripe);
-        this.sideStripes.push(stripe);
+        this.neonStripes.push(stripe);
       }
     }
 
-    // Side walls
+    // Neon side rails (animated colour)
     for (const side of [-1, 1]) {
-      const wallGeo = new THREE.BoxGeometry(0.5, 1.4, tileLen * numTiles);
-      const wallMat = new THREE.MeshStandardMaterial({
-        color: 0x2a3a66,
-        roughness: 0.9,
-      });
-      const wall = new THREE.Mesh(wallGeo, wallMat);
-      wall.position.set(side * (this.cfg.laneWidth * 1.7), 0.7, -tileLen * numTiles * 0.5 + tileLen / 2);
-      this.scene.add(wall);
+      for (let i = 0; i < 30; i++) {
+        const g = new THREE.PlaneGeometry(0.18, 2.0);
+        const mat = i % 2 === 0 ? this.mats.stripeAccent : this.mats.stripeAccent2;
+        const stripe = new THREE.Mesh(g, mat);
+        stripe.rotation.x = -Math.PI / 2;
+        stripe.position.set(side * (this.cfg.laneWidth * 1.65), 0.06, -i * 3 + 6);
+        this.scene.add(stripe);
+        this.neonStripes.push(stripe);
+      }
     }
+
+    // Side curbs
+    for (const side of [-1, 1]) {
+      const skirtGeo = new THREE.BoxGeometry(0.5, 0.4, tileLen * numTiles);
+      const skirt = new THREE.Mesh(skirtGeo, this.mats.skirt);
+      skirt.position.set(
+        side * (this.cfg.laneWidth * 1.85),
+        0.2,
+        -tileLen * numTiles * 0.5 + tileLen / 2,
+      );
+      this.scene.add(skirt);
+    }
+  }
+
+  private buildCar(): THREE.Group {
+    const palette = CAR_PALETTE[Math.floor(Math.random() * CAR_PALETTE.length)];
+    const group = new THREE.Group();
+    const bodyMat = new THREE.MeshStandardMaterial({
+      color: palette.body,
+      roughness: 0.4,
+      metalness: 0.6,
+      emissive: 0x000000,
+    });
+    const accentMat = new THREE.MeshStandardMaterial({
+      color: palette.accent,
+      roughness: 0.5,
+      metalness: 0.3,
+    });
+
+    const body = new THREE.Mesh(this.geos.carBody, bodyMat);
+    body.position.y = 0.45;
+    body.castShadow = !this.reducedMotion;
+    group.add(body);
+
+    const cabin = new THREE.Mesh(this.geos.carCabin, accentMat);
+    cabin.position.set(0, 0.85, -0.05);
+    cabin.castShadow = !this.reducedMotion;
+    group.add(cabin);
+
+    const windshield = new THREE.Mesh(this.geos.carWindshield, this.mats.glass);
+    windshield.position.set(0, 0.95, 0.5);
+    windshield.rotation.x = -0.35;
+    group.add(windshield);
+    const rearWindow = new THREE.Mesh(this.geos.carWindshield, this.mats.glass);
+    rearWindow.position.set(0, 0.95, -0.6);
+    rearWindow.rotation.x = 0.35;
+    group.add(rearWindow);
+
+    // Wheels
+    const wheels: THREE.Object3D[] = [];
+    const wheelPositions: Array<[number, number, number]> = [
+      [-0.55, 0.22, 0.7],
+      [0.55, 0.22, 0.7],
+      [-0.55, 0.22, -0.7],
+      [0.55, 0.22, -0.7],
+    ];
+    for (const [x, y, z] of wheelPositions) {
+      const w = new THREE.Mesh(this.geos.carWheel, this.mats.wheel);
+      w.rotation.z = Math.PI / 2;
+      w.position.set(x, y, z);
+      w.castShadow = !this.reducedMotion;
+      group.add(w);
+      wheels.push(w);
+    }
+
+    // Headlights (front of car = +z because cars face the player going opposite direction; we'll place them on the side facing us)
+    const hlL = new THREE.Mesh(this.geos.carHeadlight, this.mats.headlight);
+    hlL.position.set(-0.35, 0.5, 1.05);
+    group.add(hlL);
+    const hlR = new THREE.Mesh(this.geos.carHeadlight, this.mats.headlight);
+    hlR.position.set(0.35, 0.5, 1.05);
+    group.add(hlR);
+
+    // Taillights
+    const tlL = new THREE.Mesh(this.geos.carHeadlight, this.mats.taillight);
+    tlL.position.set(-0.35, 0.5, -1.05);
+    tlL.scale.set(0.8, 0.5, 0.8);
+    group.add(tlL);
+    const tlR = new THREE.Mesh(this.geos.carHeadlight, this.mats.taillight);
+    tlR.position.set(0.35, 0.5, -1.05);
+    tlR.scale.set(0.8, 0.5, 0.8);
+    group.add(tlR);
+
+    group.userData['bodyMat'] = bodyMat;
+    group.userData['accentMat'] = accentMat;
+    group.userData['wheels'] = wheels;
+    return group;
+  }
+
+  private buildCone(): THREE.Group {
+    const group = new THREE.Group();
+    const cone = new THREE.Mesh(this.geos.cone, this.mats.cone);
+    cone.position.y = 0.45;
+    cone.castShadow = !this.reducedMotion;
+    group.add(cone);
+    const stripe = new THREE.Mesh(this.geos.coneStripe, this.mats.coneStripe);
+    stripe.position.y = 0.45;
+    stripe.scale.y = 0.6;
+    group.add(stripe);
+    return group;
+  }
+
+  private buildBarrier(): THREE.Group {
+    const group = new THREE.Group();
+    const mat = new THREE.MeshStandardMaterial({ color: 0xffb547, emissive: 0x4a3300, emissiveIntensity: 0.4 });
+    const body = new THREE.Mesh(this.geos.barrier, mat);
+    body.position.y = 0.35;
+    body.castShadow = !this.reducedMotion;
+    group.add(body);
+    const stripeMat = new THREE.MeshBasicMaterial({ color: 0x1c2742 });
+    for (let i = 0; i < 5; i++) {
+      const sGeo = new THREE.PlaneGeometry(0.2, 0.55);
+      const s = new THREE.Mesh(sGeo, stripeMat);
+      s.position.set(-0.6 + i * 0.3, 0.35, 0.26);
+      group.add(s);
+    }
+    group.userData['bodyMat'] = mat;
+    group.userData['stripeMat'] = stripeMat;
+    return group;
   }
 
   private resize() {
@@ -455,7 +672,6 @@ export class BrainDashEngine {
       this.playerTargetX = this.lanePositions[target];
     }
   }
-
   private actionJump() {
     if (this.playerState === 'running') {
       this.playerState = 'jumping';
@@ -464,7 +680,6 @@ export class BrainDashEngine {
       this.playerVY = jumpInitial;
     }
   }
-
   private actionSlide() {
     if (this.playerState === 'running') {
       this.playerState = 'sliding';
@@ -528,21 +743,16 @@ export class BrainDashEngine {
     const deltaZ = speed * dt;
     this.distance += deltaZ;
 
-    // Move player forward (in -z)
     this.playerGroup.position.z += FORWARD * deltaZ;
 
-    // Smooth lane switch
     this.playerGroup.position.x +=
       (this.playerTargetX - this.playerGroup.position.x) *
       Math.min(1, this.cfg.laneSwitchSpeed * dt);
 
-    // Player state machine for jump/slide
     this.updatePlayerState(dt);
 
-    // Hit invulnerability
     if (this.hitInvulnTimer > 0) this.hitInvulnTimer -= dt;
 
-    // Spawn ahead
     this.obstacleTimer -= dt;
     this.coinTimer -= dt;
     this.pickupTimer -= dt;
@@ -562,38 +772,29 @@ export class BrainDashEngine {
       this.spawnQuestionGate();
     }
 
-    // Move world: nothing to move, since player moves; but garbage collect.
     this.cullBehind();
 
-    // Animate spinning coins/pickups
-    for (const c of this.coins) {
-      c.mesh.rotation.y += dt * 6;
-    }
+    for (const c of this.coins) c.mesh.rotation.y += dt * 6;
     for (const p of this.pickups) {
       p.mesh.rotation.y += dt * 3;
       p.mesh.position.y = 0.9 + Math.sin(this.elapsedMs / 400 + p.mesh.position.x) * 0.15;
     }
-    for (const g of this.gates) {
-      for (const p of g.plates) {
-        const mat = p.mesh.material as THREE.MeshBasicMaterial;
-        mat.opacity = 0.92;
+    // Animate car wheels — visible spin
+    for (const o of this.obstacles) {
+      if (o.kind === 'car' && o.wheels) {
+        for (const w of o.wheels) {
+          w.rotation.x += dt * 10;
+        }
       }
     }
 
-    // Collisions
     this.detectCollisions();
-
-    // Resolve gates passed
     this.resolveGates();
 
-    // Active pickup timers
-    for (const pk of this.activePickups) {
-      pk.remainingMs -= dt * 1000;
-    }
+    for (const pk of this.activePickups) pk.remainingMs -= dt * 1000;
     this.activePickups = this.activePickups.filter((p) => p.remainingMs > 0);
     this.multiplier = this.activePickups.find((p) => p.kind === 'x2') ? 2 : 1;
 
-    // Explanation flash decay
     if (this.lastExplanationTimer > 0) {
       this.lastExplanationTimer -= dt;
       if (this.lastExplanationTimer <= 0) {
@@ -601,10 +802,6 @@ export class BrainDashEngine {
       }
     }
 
-    // Score from distance
-    this.score += deltaZ * 0.5 * this.multiplier;
-
-    // Prefetch more questions when running low
     if (
       !this.prefetching &&
       this.fetchMoreQuestions &&
@@ -612,12 +809,8 @@ export class BrainDashEngine {
     ) {
       this.prefetching = true;
       this.fetchMoreQuestions(5)
-        .then((more) => {
-          this.questionPool.push(...more);
-        })
-        .catch(() => {
-          // Silent — gate spawn will simply stop once pool runs out.
-        })
+        .then((more) => this.questionPool.push(...more))
+        .catch(() => undefined)
         .finally(() => {
           this.prefetching = false;
         });
@@ -653,58 +846,64 @@ export class BrainDashEngine {
       this.playerStateTimer -= dt;
       if (this.playerStateTimer <= 0) {
         this.playerState = 'running';
-        (this.playerBox.material as THREE.Material) = this.mats.player;
-        this.playerBox.material = this.mats.player;
       }
     }
   }
 
-  private animatePlayer(dt: number) {
+  private animatePlayer(_dt: number) {
     this.playerGroup.position.y = this.playerY;
+    const running = this.playerState === 'running' && this.status === 'RUNNING';
+    const t = this.elapsedMs / 120;
     if (this.playerState === 'sliding') {
-      this.playerBox.scale.set(1, 0.5, 1);
-      this.playerBox.position.y = 0.25;
-      this.playerHead.position.y = 0.7;
+      this.playerTorso.rotation.x = -0.9;
+      this.playerTorso.position.set(0, 0.5, 0.15);
+      this.playerHead.position.set(0, 0.9, 0.4);
+      this.playerLeftArm.rotation.x = -1.2;
+      this.playerRightArm.rotation.x = -1.2;
+      this.playerLeftLeg.rotation.x = -1.0;
+      this.playerRightLeg.rotation.x = -1.0;
     } else {
-      this.playerBox.scale.set(1, 1, 1);
-      this.playerBox.position.y = 0.5;
-      this.playerHead.position.y = 1.3;
+      this.playerTorso.rotation.x = 0;
+      this.playerTorso.position.set(0, 0.95, 0);
+      this.playerHead.position.set(0, 1.55, 0);
+      if (running && !this.reducedMotion) {
+        const swing = Math.sin(t) * 0.9;
+        this.playerLeftArm.rotation.x = swing;
+        this.playerRightArm.rotation.x = -swing;
+        this.playerLeftLeg.rotation.x = -swing;
+        this.playerRightLeg.rotation.x = swing;
+        this.playerTorso.rotation.z = Math.sin(t * 2) * 0.04;
+      } else {
+        this.playerLeftArm.rotation.x = 0;
+        this.playerRightArm.rotation.x = 0;
+        this.playerLeftLeg.rotation.x = 0;
+        this.playerRightLeg.rotation.x = 0;
+        this.playerTorso.rotation.z = 0;
+      }
     }
-    // Subtle bobbing while running
-    const run = this.playerState === 'running' && this.status === 'RUNNING';
-    if (run && !this.reducedMotion) {
-      this.playerBox.rotation.z = Math.sin(this.elapsedMs / 90) * 0.05;
-      this.playerHead.rotation.y = Math.sin(this.elapsedMs / 220) * 0.15;
-    } else {
-      this.playerBox.rotation.z = 0;
-    }
-    // Hit flash
+    // Hit flicker
     if (this.hitInvulnTimer > 0) {
-      this.playerBox.material =
-        Math.floor(this.elapsedMs / 80) % 2 === 0
-          ? this.mats.playerHit
-          : this.mats.player;
+      const showHit = Math.floor(this.elapsedMs / 80) % 2 === 0;
+      this.playerTorso.material = showHit ? this.mats.playerHit : this.mats.playerBody;
     } else {
-      this.playerBox.material = this.mats.player;
+      this.playerTorso.material = this.mats.playerBody;
     }
-    void dt;
   }
 
   private updateCamera() {
     const target = this.playerGroup.position;
-    const desired = new THREE.Vector3(target.x * 0.5, 4.6, target.z + 7.5);
+    const desired = new THREE.Vector3(target.x * 0.4, 4.8, target.z + 8.0);
     this.camera.position.lerp(desired, 0.15);
-    this.camera.lookAt(target.x * 0.3, 1.2, target.z - 4);
+    this.camera.lookAt(target.x * 0.25, 1.2, target.z - 4);
   }
 
   // ----- spawning -----
 
   private spawnObstacleRow() {
     const spawnZ = this.playerGroup.position.z - 80;
-    const kinds: ObstacleObj['kind'][] = ['low', 'high', 'full'];
+    // 70% car, 25% cone, 5% barrier — cars dominate per user feedback
     const occupied = new Set<number>();
-    // 1 or 2 obstacles, never blocking all 3 lanes simultaneously without alt
-    const count = Math.random() < 0.65 ? 1 : 2;
+    const count = Math.random() < 0.62 ? 1 : 2;
     for (let i = 0; i < count; i++) {
       let lane = Math.floor(Math.random() * 3);
       let tries = 0;
@@ -713,32 +912,24 @@ export class BrainDashEngine {
         tries++;
       }
       occupied.add(lane);
-      const kind = kinds[Math.floor(Math.random() * kinds.length)];
-      let geo: THREE.BufferGeometry;
-      let mat: THREE.Material;
-      let yPos = 0.35;
-      switch (kind) {
-        case 'low':
-          geo = this.geos.low;
-          mat = this.mats.obstacleLow;
-          yPos = 0.35;
-          break;
-        case 'high':
-          geo = this.geos.high;
-          mat = this.mats.obstacleHigh;
-          yPos = 1.45;
-          break;
-        case 'full':
-          geo = this.geos.full;
-          mat = this.mats.obstacleFull;
-          yPos = 1.0;
-          break;
+      const r = Math.random();
+      let kind: ObstacleObj['kind'];
+      let group: THREE.Group;
+      let wheels: THREE.Object3D[] | undefined;
+      if (r < 0.7) {
+        kind = 'car';
+        group = this.buildCar();
+        wheels = group.userData['wheels'] as THREE.Object3D[];
+      } else if (r < 0.92) {
+        kind = 'cone';
+        group = this.buildCone();
+      } else {
+        kind = 'barrier';
+        group = this.buildBarrier();
       }
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.castShadow = !this.reducedMotion;
-      mesh.position.set(this.lanePositions[lane], yPos, spawnZ);
-      this.scene.add(mesh);
-      this.obstacles.push({ mesh, kind, lane });
+      group.position.set(this.lanePositions[lane], 0, spawnZ - i * 1.5);
+      this.scene.add(group);
+      this.obstacles.push({ group, kind, lane, wheels });
     }
   }
 
@@ -748,7 +939,7 @@ export class BrainDashEngine {
     const len = 3 + Math.floor(Math.random() * 4);
     for (let i = 0; i < len; i++) {
       const mesh = new THREE.Mesh(this.geos.coin, this.mats.coin);
-      mesh.position.set(this.lanePositions[lane], 0.6, spawnZ - i * 1.4);
+      mesh.position.set(this.lanePositions[lane], 0.7, spawnZ - i * 1.4);
       mesh.rotation.x = Math.PI / 2;
       this.scene.add(mesh);
       this.coins.push({ mesh, lane });
@@ -782,13 +973,11 @@ export class BrainDashEngine {
 
   private spawnQuestionGate() {
     if (this.questionCursor >= this.questionPool.length) {
-      // Out of questions — extend interval to avoid spamming attempts.
       this.nextQuestionAtDistance = this.distance + this.cfg.questionEveryMeters;
       return;
     }
     const question = this.questionPool[this.questionCursor++];
-    const spawnZ = this.playerGroup.position.z - 60;
-    // Pick 3 options: correct + 2 distractors (or all if there are 3).
+    const spawnZ = this.playerGroup.position.z - 65;
     const correctOpt = question.options.find((o) => o.id === question.correctOptionId);
     if (!correctOpt) return;
     const others = question.options.filter((o) => o.id !== correctOpt.id);
@@ -800,17 +989,23 @@ export class BrainDashEngine {
       2: lineup[2].id,
     };
 
+    // Question banner above the road
+    const banner = makeBannerMesh(question.text);
+    banner.mesh.position.set(0, 4.4, spawnZ - 1.5);
+    banner.mesh.rotation.x = -0.15;
+    this.scene.add(banner.mesh);
+
     const plates: GatePlate[] = [];
     for (let lane: 0 | 1 | 2 = 0; lane <= 2; lane = (lane + 1) as 0 | 1 | 2) {
       const opt = lineup[lane];
-      const texture = makeLabelTexture(opt.text);
+      const texture = makeOptionTexture(opt.text, ['A', 'B', 'C'][lane]);
       const mat = new THREE.MeshBasicMaterial({
         map: texture,
         transparent: true,
-        opacity: 0.9,
+        opacity: 0.95,
       });
       const mesh = new THREE.Mesh(this.geos.gatePlate, mat);
-      mesh.position.set(this.lanePositions[lane], 1.4, spawnZ);
+      mesh.position.set(this.lanePositions[lane], 1.6, spawnZ);
       this.scene.add(mesh);
       plates.push({ mesh, lane, optionId: opt.id, texture });
       if (lane === 2) break;
@@ -822,6 +1017,7 @@ export class BrainDashEngine {
       zTrigger: spawnZ,
       laneToOptionId,
       plates,
+      banner,
       resolved: false,
       spawnedAtMs: this.elapsedMs,
       spawnedAtDistance: this.distance,
@@ -840,30 +1036,10 @@ export class BrainDashEngine {
 
   // ----- collisions -----
 
-  private playerHitbox(): { minX: number; maxX: number; minY: number; maxY: number; minZ: number; maxZ: number } {
-    const px = this.playerGroup.position.x;
-    const pz = this.playerGroup.position.z;
-    const py = this.playerY;
-    const sliding = this.playerState === 'sliding';
-    const halfW = 0.35;
-    const halfD = 0.35;
-    const minY = py + (sliding ? 0 : 0);
-    const maxY = py + (sliding ? 0.5 : 1.5);
-    return {
-      minX: px - halfW,
-      maxX: px + halfW,
-      minY,
-      maxY,
-      minZ: pz - halfD,
-      maxZ: pz + halfD,
-    };
-  }
-
   private detectCollisions() {
-    const pb = this.playerHitbox();
+    const magnetActive = this.activePickups.some((p) => p.kind === 'magnet');
 
     // Coins
-    const magnetActive = this.activePickups.some((p) => p.kind === 'magnet');
     const remainingCoins: CoinObj[] = [];
     for (const c of this.coins) {
       if (magnetActive && Math.abs(c.mesh.position.z - this.playerGroup.position.z) < 5) {
@@ -875,7 +1051,7 @@ export class BrainDashEngine {
       const dy = c.mesh.position.y - (this.playerY + 0.6);
       if (Math.abs(dx) < 0.55 && Math.abs(dz) < 0.55 && Math.abs(dy) < 1.0) {
         this.coinsCollected += 1;
-        this.score += 5 * this.multiplier;
+        this.score += 1 * this.multiplier;
         this.scene.remove(c.mesh);
         continue;
       }
@@ -900,17 +1076,17 @@ export class BrainDashEngine {
     // Obstacles
     const remainingObs: ObstacleObj[] = [];
     for (const o of this.obstacles) {
-      const dz = o.mesh.position.z - this.playerGroup.position.z;
-      // Box test approx
-      const dx = o.mesh.position.x - this.playerGroup.position.x;
+      const dz = o.group.position.z - this.playerGroup.position.z;
+      const dx = o.group.position.x - this.playerGroup.position.x;
       const sameLane = Math.abs(dx) < 1.0;
-      const closeZ = dz > -0.6 && dz < 0.6;
+      const closeZ = dz > -0.7 && dz < 0.7;
       if (sameLane && closeZ && this.hitInvulnTimer <= 0) {
-        const passLow = o.kind === 'low' && pb.minY > 0.8;
-        const passHigh = o.kind === 'high' && this.playerState === 'sliding';
-        if (!passLow && !passHigh) {
+        const passCone = o.kind === 'cone' && this.playerY > 0.6;
+        const passBarrier = o.kind === 'barrier' && this.playerY > 0.9;
+        // Cars cannot be jumped or slid — only side-step.
+        if (!passCone && !passBarrier) {
           this.onHit('obstacle');
-          this.scene.remove(o.mesh);
+          this.scene.remove(o.group);
           continue;
         }
       }
@@ -923,7 +1099,6 @@ export class BrainDashEngine {
     const remainingGates: ActiveGate[] = [];
     for (const g of this.gates) {
       if (!g.resolved && this.playerGroup.position.z <= g.zTrigger + 0.2) {
-        // Crossed gate
         const lane = this.playerLane as 0 | 1 | 2;
         const chosenOpt = g.laneToOptionId[lane];
         const correct = chosenOpt === g.question.correctOptionId;
@@ -938,26 +1113,46 @@ export class BrainDashEngine {
         this.answers.push(ans);
         this.handlers.onAnswer(ans);
         g.resolved = true;
+        // Flash the plates: correct→green, wrong→red
+        for (const p of g.plates) {
+          const isRight = p.optionId === g.question.correctOptionId;
+          const m = p.mesh.material as THREE.MeshBasicMaterial;
+          m.color = new THREE.Color(isRight ? 0x4cd964 : 0xff5470);
+          m.map = null;
+          m.needsUpdate = true;
+        }
         if (correct) {
           this.combo += 1;
-          this.score += 100 * this.multiplier + g.question.difficulty * 10;
+          this.score += 10 * this.multiplier; // +10 per correct as user requested
           this.coinsCollected += 5;
         } else {
           this.combo = 0;
           this.onHit('wrong_answer');
         }
         if (g.question.explanation) {
-          this.lastExplanation = g.question.explanation;
+          this.lastExplanation =
+            (correct ? '✓ ' : '✗ ') + g.question.explanation;
           this.lastExplanationTimer = 2.5;
+        } else {
+          this.lastExplanation = correct ? '+10 очков!' : 'Неверно — −1 жизнь';
+          this.lastExplanationTimer = 1.6;
         }
         this.currentQuestion = undefined;
+        // End of round?
+        if (this.answers.length >= this.cfg.questionsPerRound) {
+          this.finish();
+        }
       }
-      // Despawn behind player
       if (this.playerGroup.position.z < g.zTrigger - 6) {
         for (const p of g.plates) {
           this.scene.remove(p.mesh);
           (p.mesh.material as THREE.Material).dispose();
           p.texture.dispose();
+        }
+        if (g.banner) {
+          this.scene.remove(g.banner.mesh);
+          (g.banner.mesh.material as THREE.Material).dispose();
+          g.banner.texture.dispose();
         }
       } else {
         remainingGates.push(g);
@@ -1000,8 +1195,8 @@ export class BrainDashEngine {
   private cullBehind() {
     const limit = this.playerGroup.position.z + 6;
     this.obstacles = this.obstacles.filter((o) => {
-      if (o.mesh.position.z > limit) {
-        this.scene.remove(o.mesh);
+      if (o.group.position.z > limit) {
+        this.scene.remove(o.group);
         return false;
       }
       return true;
@@ -1020,15 +1215,22 @@ export class BrainDashEngine {
       }
       return true;
     });
-    // recycle ground tiles
     for (const tile of this.groundTiles) {
       if (tile.position.z > this.playerGroup.position.z + this.cfg.worldChunkLength) {
-        // move to furthest ahead
         const furthest = this.groundTiles.reduce(
           (acc, t) => Math.min(acc, t.position.z),
           Infinity,
         );
         tile.position.z = furthest - this.cfg.worldChunkLength;
+      }
+    }
+    for (const stripe of this.neonStripes) {
+      if (stripe.position.z > this.playerGroup.position.z + 6) {
+        const farthest = this.neonStripes.reduce(
+          (acc, s) => Math.min(acc, s.position.z),
+          Infinity,
+        );
+        stripe.position.z = farthest - 3;
       }
     }
   }
@@ -1049,12 +1251,6 @@ export class BrainDashEngine {
     };
     this.handlers.onFinished(summary);
     this.setStatus('RESULTS');
-  }
-
-  endNow(reason: 'user' | 'finished') {
-    if (reason === 'user') {
-      this.finish();
-    }
   }
 
   // ----- HUD plumbing -----
@@ -1097,6 +1293,19 @@ function shuffle<T>(arr: T[]): T[] {
   return out;
 }
 
+function makeLimb(
+  geo: THREE.BufferGeometry,
+  mat: THREE.Material,
+  pivotOffset: number,
+): THREE.Group {
+  const group = new THREE.Group();
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.y = -pivotOffset;
+  mesh.castShadow = true;
+  group.add(mesh);
+  return group;
+}
+
 function hudEquals(a: BrainDashHud | null, b: BrainDashHud) {
   if (!a) return false;
   return (
@@ -1111,34 +1320,77 @@ function hudEquals(a: BrainDashHud | null, b: BrainDashHud) {
     a.countdown === b.countdown &&
     a.question?.question.id === b.question?.question.id &&
     a.lastExplanation === b.lastExplanation &&
-    a.pickups.length === b.pickups.length
+    a.pickups.length === b.pickups.length &&
+    a.questionsAsked === b.questionsAsked &&
+    a.questionsCorrect === b.questionsCorrect
   );
 }
 
-function makeLabelTexture(text: string): THREE.CanvasTexture {
+function makeOptionTexture(text: string, letter: string): THREE.CanvasTexture {
   const canvas = document.createElement('canvas');
   canvas.width = 512;
-  canvas.height = 256;
+  canvas.height = 384;
   const ctx = canvas.getContext('2d')!;
-  // bg
   const grad = ctx.createLinearGradient(0, 0, 0, canvas.height);
-  grad.addColorStop(0, 'rgba(28,39,66,0.95)');
-  grad.addColorStop(1, 'rgba(11,15,26,0.95)');
+  grad.addColorStop(0, 'rgba(28,39,66,0.96)');
+  grad.addColorStop(1, 'rgba(11,15,26,0.96)');
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.strokeStyle = 'rgba(108,92,231,0.7)';
-  ctx.lineWidth = 6;
-  ctx.strokeRect(6, 6, canvas.width - 12, canvas.height - 12);
+  ctx.strokeStyle = 'rgba(108,92,231,0.95)';
+  ctx.lineWidth = 8;
+  ctx.strokeRect(8, 8, canvas.width - 16, canvas.height - 16);
 
-  ctx.fillStyle = '#f5f7fb';
-  ctx.font = 'bold 36px "Inter", system-ui, sans-serif';
+  // Letter badge
+  ctx.fillStyle = '#6c5ce7';
+  ctx.beginPath();
+  ctx.arc(canvas.width / 2, 70, 38, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 44px "Inter", system-ui, sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  wrapText(ctx, text, canvas.width / 2, canvas.height / 2, canvas.width - 60, 42);
+  ctx.fillText(letter, canvas.width / 2, 72);
+
+  ctx.fillStyle = '#f5f7fb';
+  ctx.font = 'bold 44px "Inter", system-ui, sans-serif';
+  wrapText(ctx, text, canvas.width / 2, canvas.height / 2 + 50, canvas.width - 60, 52);
+
   const tex = new THREE.CanvasTexture(canvas);
   tex.anisotropy = 4;
   tex.needsUpdate = true;
   return tex;
+}
+
+function makeBannerMesh(text: string): { mesh: THREE.Mesh; texture: THREE.CanvasTexture } {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1024;
+  canvas.height = 192;
+  const ctx = canvas.getContext('2d')!;
+  const grad = ctx.createLinearGradient(0, 0, canvas.width, 0);
+  grad.addColorStop(0, 'rgba(108,92,231,0.95)');
+  grad.addColorStop(1, 'rgba(0,184,148,0.95)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 10;
+  ctx.strokeRect(10, 10, canvas.width - 20, canvas.height - 20);
+
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 64px "Inter", system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.shadowColor = 'rgba(0,0,0,0.45)';
+  ctx.shadowBlur = 8;
+  wrapText(ctx, text, canvas.width / 2, canvas.height / 2, canvas.width - 80, 70);
+  ctx.shadowBlur = 0;
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.anisotropy = 4;
+  tex.needsUpdate = true;
+  const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.DoubleSide });
+  const geo = new THREE.PlaneGeometry(7.5, 1.2);
+  const mesh = new THREE.Mesh(geo, mat);
+  return { mesh, texture: tex };
 }
 
 function wrapText(

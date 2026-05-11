@@ -42,7 +42,7 @@ type Phase =
   | { kind: 'playing'; questions: QuizQuestion[] };
 
 const QUESTIONS_PER_ROUND: Record<GameId, number> = {
-  'brain-dash': 8,
+  'brain-dash': 5,
   'lore-quest': 14,
 };
 

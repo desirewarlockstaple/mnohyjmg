@@ -49,7 +49,7 @@ export default function App() {
   return (
     <div className="app-shell">
       {!launch && (
-        <HomeScreen user={user} konspekts={konspekts} onLaunch={handleLaunch} />
+        <HomeScreen user={user} builtInKonspekts={konspekts} onLaunch={handleLaunch} />
       )}
       {launch && (
         <GameHost
