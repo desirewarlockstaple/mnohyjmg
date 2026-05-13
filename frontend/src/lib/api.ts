@@ -1,7 +1,18 @@
+import {
+  mockCorridors,
+  mockEta,
+  mockForecast,
+  mockIncidents,
+  mockSegments,
+  mockStats,
+} from "./twin";
+
 const fromEnv = (import.meta.env.VITE_API_URL as string | undefined)?.trim();
 export const API_BASE = (fromEnv && fromEnv.length > 0)
   ? fromEnv.replace(/\/$/, "")
-  : "https://pulsegrid-api.fly.dev";
+  : "";
+
+const HAS_REMOTE = API_BASE.length > 0;
 
 export type Corridor = {
   id: string;
@@ -77,16 +88,46 @@ async function get<T>(path: string): Promise<T> {
   return r.json() as Promise<T>;
 }
 
+async function withFallback<T>(remote: () => Promise<T>, mock: () => T | null): Promise<T> {
+  if (HAS_REMOTE) {
+    try {
+      return await remote();
+    } catch {
+      const m = mock();
+      if (m !== null) return m;
+      throw new Error("API unreachable and mock unavailable");
+    }
+  }
+  const m = mock();
+  if (m === null) throw new Error("Mock unavailable");
+  return m;
+}
+
 export const api = {
-  corridors: () => get<Corridor[]>("/v1/corridors"),
-  segments: (corridorId: string) => get<Segment[]>(`/v1/corridors/${corridorId}/segments`),
+  corridors: () =>
+    withFallback(() => get<Corridor[]>("/v1/corridors"), () => mockCorridors()),
+  segments: (corridorId: string) =>
+    withFallback(
+      () => get<Segment[]>(`/v1/corridors/${corridorId}/segments`),
+      () => mockSegments(corridorId),
+    ),
   incidents: (corridorId?: string) =>
-    get<Incident[]>(`/v1/incidents${corridorId ? `?corridor_id=${corridorId}` : ""}`),
+    withFallback(
+      () => get<Incident[]>(`/v1/incidents${corridorId ? `?corridor_id=${corridorId}` : ""}`),
+      () => mockIncidents(corridorId),
+    ),
   eta: (origin: [number, number], destination: [number, number], mode: "car" | "motorcycle" = "car") =>
-    get<EtaResponse>(
-      `/v1/eta?origin=${origin[0]},${origin[1]}&destination=${destination[0]},${destination[1]}&mode=${mode}`
+    withFallback(
+      () =>
+        get<EtaResponse>(
+          `/v1/eta?origin=${origin[0]},${origin[1]}&destination=${destination[0]},${destination[1]}&mode=${mode}`,
+        ),
+      () => mockEta(origin, destination, mode),
     ),
   forecast: (corridorId: string, horizon = 90) =>
-    get<CorridorForecast>(`/v1/forecast?corridor_id=${corridorId}&horizon_minutes=${horizon}`),
-  stats: () => get<Stats>("/v1/stats"),
+    withFallback(
+      () => get<CorridorForecast>(`/v1/forecast?corridor_id=${corridorId}&horizon_minutes=${horizon}`),
+      () => mockForecast(corridorId, horizon),
+    ),
+  stats: () => withFallback(() => get<Stats>("/v1/stats"), () => mockStats()),
 };

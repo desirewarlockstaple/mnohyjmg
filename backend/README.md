@@ -8,7 +8,7 @@ incident detections.
 
 ```bash
 uv sync
-uv run uvicorn pulsegrid_api.main:app --reload --port 8000
+uv run uvicorn app.main:app --reload --port 8000
 ```
 
 Interactive Swagger UI: <http://localhost:8000/docs>

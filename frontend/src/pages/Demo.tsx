@@ -24,20 +24,23 @@ export default function Demo() {
 
   useEffect(() => {
     if (!active) return;
-    setError(null);
     Promise.all([
       api.segments(active),
       api.incidents(active),
       api.forecast(active, 90),
     ]).then(([s, i, f]) => {
-      setSegments(s); setIncidents(i); setForecast(f);
+      setSegments(s); setIncidents(i); setForecast(f); setError(null);
     }).catch((e) => setError(String(e)));
   }, [active, tick]);
 
-  useEffect(() => {
-    setPick({});
-    setEta(null);
-  }, [active]);
+  /* eslint-disable react-hooks/refs */
+  const lastActive = useRef<string | null>(null);
+  if (lastActive.current !== active) {
+    lastActive.current = active;
+    if (pick.origin || pick.dest) setPick({});
+    if (eta) setEta(null);
+  }
+  /* eslint-enable react-hooks/refs */
 
   useEffect(() => {
     const id = window.setInterval(() => setTick((x) => x + 1), 15000);
