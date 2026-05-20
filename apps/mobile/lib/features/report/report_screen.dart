@@ -37,7 +37,7 @@ class _ReportScreenState extends ConsumerState<ReportScreen> {
       }
       if (perm != LocationPermission.denied && perm != LocationPermission.deniedForever) {
         pos = await Geolocator.getCurrentPosition(
-          locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+          desiredAccuracy: LocationAccuracy.high,
         );
       }
     } catch (_) {
